@@ -315,7 +315,11 @@ def test_arm_controllers_yaml_parses_and_has_expected_shape():
     jtc_params = data["joint_trajectory_controller"]["ros__parameters"]
     assert jtc_params["joints"] == ["joint1", "joint2"]
     assert set(jtc_params["command_interfaces"]) == {"velocity", "effort"}
-    assert set(jtc_params["state_interfaces"]) == {"position", "velocity", "effort"}
+    # NOT "effort" -- joint_trajectory_controller's own state_interfaces param
+    # only accepts {position, velocity, acceleration}; confirmed for real
+    # against a live controller_manager (see ros2_control.py's
+    # _JTC_STATE_INTERFACES comment for the exact rejection error).
+    assert set(jtc_params["state_interfaces"]) == {"position", "velocity"}
 
     assert "diff_drive_controller" not in data
 
@@ -382,6 +386,11 @@ def test_arm_launch_file_is_syntactically_valid_python():
     # controller_manager: joint_trajectory_controller failed to initialize
     # with "Length of parameter 'joints' is '0'" without this).
     assert text.count("--param-file") == 2
+    # Regression: ros2_control_node subscribes to /robot_description as a
+    # topic and hangs forever without something publishing it -- confirmed
+    # for real (see generate_control_launch's docstring for the exact log
+    # messages this produced before robot_state_publisher was added here).
+    assert "robot_state_publisher" in text
 
 
 def test_diff_drive_launch_file_is_syntactically_valid_python():
