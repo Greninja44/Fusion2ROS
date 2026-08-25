@@ -12,7 +12,7 @@ from fusion_addin.app import (
     generate_ros_package,
     run_pipeline,
 )
-from robot_model import Inertial, Joint, JointType, Link, Robot
+from robot_model import Actuator, Inertial, Joint, JointType, Link, Robot
 
 from tests.fusion_addin.test_extraction import FakeFusionDesignReader
 from fusion_addin.extraction.interface import FusionInertia, FusionJointInfo, FusionOccurrence, FusionPose
@@ -137,3 +137,149 @@ def test_run_pipeline_end_to_end(tmp_path):
     robot.joint("joint1").effort_limit = 10.0
     package_dir = generate_ros_package(robot, {}, tmp_path)
     assert (package_dir / "urdf" / "e2e_robot.urdf.xacro").exists()
+
+
+# ---------------------------------------------------------------------------
+# Integration of the ros2_control / Gazebo / MoveIt 2 / Nav2 generators into
+# generate_ros_package's include_* flags.
+# ---------------------------------------------------------------------------
+
+
+def make_diff_drive_robot():
+    from robot_model import Geometry
+
+    base = Link(
+        name="base_link",
+        collision_geometry=Geometry(kind="box", size=(0.4, 0.3, 0.15)),
+        inertial=Inertial(mass=5.0, ixx=0.1, iyy=0.1, izz=0.1),
+    )
+    left_wheel = Link(
+        name="left_wheel",
+        parent="base_link",
+        collision_geometry=Geometry(kind="cylinder", radius=0.1, length=0.04),
+        inertial=Inertial(mass=0.2, ixx=0.001, iyy=0.001, izz=0.001),
+    )
+    right_wheel = Link(
+        name="right_wheel",
+        parent="base_link",
+        collision_geometry=Geometry(kind="cylinder", radius=0.1, length=0.04),
+        inertial=Inertial(mass=0.2, ixx=0.001, iyy=0.001, izz=0.001),
+    )
+    left_joint = Joint(
+        name="left_wheel_joint", type=JointType.CONTINUOUS, parent="base_link", child="left_wheel", axis=(0, 1, 0)
+    )
+    right_joint = Joint(
+        name="right_wheel_joint", type=JointType.CONTINUOUS, parent="base_link", child="right_wheel", axis=(0, 1, 0)
+    )
+    return Robot(
+        name="app_test_rover",
+        links=[base, left_wheel, right_wheel],
+        joints=[left_joint, right_joint],
+        metadata={
+            "drivetrain": {
+                "type": "differential_drive",
+                "left_wheel_joint": "left_wheel_joint",
+                "right_wheel_joint": "right_wheel_joint",
+                "wheel_separation": 0.4,
+                "wheel_radius": 0.1,
+            }
+        },
+    )
+
+
+def test_generate_ros_package_with_ros2_control_arm(tmp_path):
+    robot = make_simple_robot(with_limits=True)
+    robot.actuators.append(Actuator(name="joint1_motor", type="electric_motor", joint="joint1", interface="position"))
+
+    package_dir = generate_ros_package(robot, {}, tmp_path, include_ros2_control=True)
+
+    assert (package_dir / "config" / "controllers.yaml").exists()
+    assert (package_dir / "launch" / "control.launch.py").exists()
+    urdf_text = (package_dir / "urdf" / f"{robot.name}.urdf.xacro").read_text()
+    assert "<ros2_control" in urdf_text
+    assert "</robot>" in urdf_text.strip().splitlines()[-1] or urdf_text.rstrip().endswith("</robot>")
+
+
+def test_generate_ros_package_with_gazebo(tmp_path):
+    robot = make_simple_robot(with_limits=True)
+
+    package_dir = generate_ros_package(robot, {}, tmp_path, include_gazebo=True)
+
+    assert (package_dir / "worlds" / "empty.sdf").exists()
+    assert (package_dir / "launch" / "gazebo.launch.py").exists()
+    urdf_text = (package_dir / "urdf" / f"{robot.name}.urdf.xacro").read_text()
+    assert "<gazebo" in urdf_text
+    assert "gazebo_fragment" not in urdf_text  # wrapper must be unwrapped, not leaked into the URDF
+
+
+def test_generate_ros_package_with_ros2_control_and_gazebo_both_splice(tmp_path):
+    robot = make_simple_robot(with_limits=True)
+    robot.actuators.append(Actuator(name="joint1_motor", type="electric_motor", joint="joint1", interface="position"))
+
+    package_dir = generate_ros_package(robot, {}, tmp_path, include_ros2_control=True, include_gazebo=True)
+
+    urdf_text = (package_dir / "urdf" / f"{robot.name}.urdf.xacro").read_text()
+    assert "<ros2_control" in urdf_text
+    assert "<gazebo" in urdf_text
+    import xml.etree.ElementTree as ET
+
+    ET.fromstring(urdf_text)  # must still be well-formed XML with both fragments spliced in
+
+
+def test_generate_ros_package_with_moveit_suitable(tmp_path):
+    robot = make_simple_robot(with_limits=True)
+
+    package_dir = generate_ros_package(robot, {}, tmp_path, include_moveit=True, moveit_group_name="arm")
+
+    assert (package_dir / "config" / f"{robot.name}.srdf").exists()
+    assert (package_dir / "config" / "joint_limits.yaml").exists()
+    assert (package_dir / "config" / "kinematics.yaml").exists()
+    assert (package_dir / "config" / "moveit_controllers.yaml").exists()
+    assert (package_dir / "launch" / "moveit_demo.launch.py").exists()
+
+
+def test_generate_ros_package_with_moveit_unsuitable_raises(tmp_path):
+    robot = make_diff_drive_robot()  # a drivetrain robot is not MoveIt-suitable
+    with pytest.raises(PipelineError):
+        generate_ros_package(robot, {}, tmp_path, include_moveit=True)
+
+
+def test_generate_ros_package_with_nav2_suitable(tmp_path):
+    robot = make_diff_drive_robot()
+
+    package_dir = generate_ros_package(robot, {}, tmp_path, include_nav2=True)
+
+    assert (package_dir / "config" / "nav2_params.yaml").exists()
+    assert (package_dir / "launch" / "nav2_bringup.launch.py").exists()
+    assert (package_dir / "config" / "map.yaml").exists()
+
+
+def test_generate_ros_package_with_nav2_unsuitable_raises(tmp_path):
+    robot = make_simple_robot(with_limits=True)  # an arm has no drivetrain metadata
+    with pytest.raises(PipelineError):
+        generate_ros_package(robot, {}, tmp_path, include_nav2=True)
+
+
+def test_generate_ros_package_all_four_together_on_diff_drive(tmp_path):
+    # A mobile base with wheel actuators requesting every optional output at
+    # once (ros2_control + gazebo + nav2; NOT moveit, since a drivetrain
+    # robot is correctly refused by detect_moveit_suitability).
+    robot = make_diff_drive_robot()
+    robot.actuators.append(
+        Actuator(name="left_wheel_motor", type="electric_motor", joint="left_wheel_joint", interface="velocity")
+    )
+    robot.actuators.append(
+        Actuator(name="right_wheel_motor", type="electric_motor", joint="right_wheel_joint", interface="velocity")
+    )
+
+    package_dir = generate_ros_package(
+        robot, {}, tmp_path, include_ros2_control=True, include_gazebo=True, include_nav2=True
+    )
+
+    urdf_text = (package_dir / "urdf" / f"{robot.name}.urdf.xacro").read_text()
+    import xml.etree.ElementTree as ET
+
+    ET.fromstring(urdf_text)
+    assert (package_dir / "config" / "controllers.yaml").exists()
+    assert (package_dir / "worlds" / "empty.sdf").exists()
+    assert (package_dir / "config" / "nav2_params.yaml").exists()
