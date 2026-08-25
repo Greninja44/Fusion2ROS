@@ -197,6 +197,38 @@ def test_mesh_files_rejects_unsupported_type(tmp_path):
         generate_package(robot, TRIVIAL_URDF_XACRO, {"bad.stl": "not bytes or Path"}, tmp_path)
 
 
+def test_extra_files_written_and_installed(tmp_path):
+    # This is the integration point ros2_control/gazebo/moveit/nav2's
+    # generated config/launch text lands through -- confirm it actually
+    # reaches disk under the package dir, in a config/ dir the CMakeLists
+    # installs, alongside str-vs-bytes handling like mesh_files has.
+    robot = make_demo_robot()
+    pkg_dir = generate_package(
+        robot,
+        TRIVIAL_URDF_XACRO,
+        {},
+        tmp_path,
+        extra_files={
+            "config/controllers.yaml": "controller_manager:\n  ros__parameters: {}\n",
+            "launch/control.launch.py": "def generate_launch_description():\n    pass\n",
+            "config/binary.bin": b"\x00\x01\x02",
+        },
+    )
+
+    assert (pkg_dir / "config" / "controllers.yaml").read_text() == "controller_manager:\n  ros__parameters: {}\n"
+    assert (pkg_dir / "launch" / "control.launch.py").is_file()
+    assert (pkg_dir / "config" / "binary.bin").read_bytes() == b"\x00\x01\x02"
+    assert "config" in (pkg_dir / "CMakeLists.txt").read_text()
+
+
+def test_extra_files_rejects_unsupported_type(tmp_path):
+    robot = make_demo_robot()
+    with pytest.raises(TypeError):
+        generate_package(
+            robot, TRIVIAL_URDF_XACRO, {}, tmp_path, extra_files={"config/bad.yaml": 12345}
+        )
+
+
 @pytest.mark.skipif(
     shutil.which("colcon") is None or not ROS_SETUP.is_file(),
     reason="colcon and/or /opt/ros/lyrical/setup.bash not available in this environment",
