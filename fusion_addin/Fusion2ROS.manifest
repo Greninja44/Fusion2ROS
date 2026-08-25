@@ -1,0 +1,10 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "addin",
+    "author": "Fusion2ROS",
+    "description": {
+        "": "Converts a Fusion 360 robot CAD assembly into a ROS 2 package (URDF/Xacro, meshes, launch files)."
+    },
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}
