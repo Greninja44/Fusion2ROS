@@ -376,6 +376,12 @@ def test_arm_launch_file_is_syntactically_valid_python():
     assert "joint_trajectory_controller" in text
     assert "ros2_control_node" in text
     assert "def generate_launch_description" in text
+    # Regression: this ros2_control version requires each spawner to receive
+    # --param-file directly (passing --params-file only to ros2_control_node
+    # at startup is NOT enough -- confirmed for real against a live
+    # controller_manager: joint_trajectory_controller failed to initialize
+    # with "Length of parameter 'joints' is '0'" without this).
+    assert text.count("--param-file") == 2
 
 
 def test_diff_drive_launch_file_is_syntactically_valid_python():

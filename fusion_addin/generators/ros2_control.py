@@ -392,14 +392,14 @@ def generate_launch_description():
     joint_state_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_state_broadcaster"],
+        arguments=["joint_state_broadcaster", "--param-file", controllers_yaml_path],
         output="screen",
     )
 
     second_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=[SECOND_CONTROLLER],
+        arguments=[SECOND_CONTROLLER, "--param-file", controllers_yaml_path],
         output="screen",
     )
 
