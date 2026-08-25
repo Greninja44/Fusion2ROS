@@ -67,12 +67,22 @@ def generate_package(
         d.mkdir(parents=True, exist_ok=True)
 
     _write_package_xml(robot, pkg_dir)
-    _write_cmakelists(robot, pkg_dir)
     _write_urdf_xacro(robot, urdf_dir, urdf_xacro)
     _write_meshes(mesh_files, meshes_dir)
     _write_launch(robot, launch_dir)
     _write_rviz(robot, rviz_dir)
     _write_extra_files(extra_files or {}, pkg_dir)
+
+    # Written last: extra_files can introduce entirely new top-level dirs
+    # (e.g. gazebo.py's "worlds/") beyond the fixed urdf/meshes/launch/rviz/
+    # config set -- discovering what's actually on disk here, rather than
+    # hardcoding a directory list, is what makes CMakeLists actually install
+    # them. (A real bug this exact gap caused: a generated worlds/empty.sdf
+    # sat in the package but was never installed, so `gz sim` reported
+    # "Unable to find or download file ... worlds/empty.sdf" at launch even
+    # though colcon build had reported success.)
+    install_dirs = sorted(p.name for p in pkg_dir.iterdir() if p.is_dir())
+    _write_cmakelists(robot, pkg_dir, install_dirs)
 
     return pkg_dir
 
@@ -132,7 +142,8 @@ def _write_package_xml(robot: Robot, pkg_dir: Path) -> None:
     (pkg_dir / "package.xml").write_text(content, encoding="utf-8")
 
 
-def _write_cmakelists(robot: Robot, pkg_dir: Path) -> None:
+def _write_cmakelists(robot: Robot, pkg_dir: Path, install_dirs) -> None:
+    dir_lines = "\n".join(f"    {d}" for d in install_dirs)
     content = f"""cmake_minimum_required(VERSION 3.10)
 project({robot.name})
 
@@ -140,11 +151,7 @@ find_package(ament_cmake REQUIRED)
 
 install(
   DIRECTORY
-    urdf
-    meshes
-    launch
-    rviz
-    config
+{dir_lines}
   DESTINATION share/${{PROJECT_NAME}}
 )
 

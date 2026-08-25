@@ -221,6 +221,24 @@ def test_extra_files_written_and_installed(tmp_path):
     assert "config" in (pkg_dir / "CMakeLists.txt").read_text()
 
 
+def test_extra_files_introducing_a_new_top_level_dir_is_installed(tmp_path):
+    # Regression: gazebo.py's generated worlds/empty.sdf sat in the package
+    # but was never installed by CMakeLists (which hardcoded a fixed
+    # urdf/meshes/launch/rviz/config list) -- `gz sim` reported "Unable to
+    # find or download file ... worlds/empty.sdf" at launch despite a
+    # successful colcon build. install_dirs must be computed from what's
+    # actually on disk, not a fixed list, so any generator's new top-level
+    # directory (not just the ones known about today) gets installed too.
+    robot = make_demo_robot()
+    pkg_dir = generate_package(
+        robot, TRIVIAL_URDF_XACRO, {}, tmp_path, extra_files={"worlds/empty.sdf": "<sdf version='1.8'></sdf>\n"}
+    )
+
+    assert (pkg_dir / "worlds" / "empty.sdf").is_file()
+    cmake_text = (pkg_dir / "CMakeLists.txt").read_text()
+    assert "worlds" in cmake_text.split("DIRECTORY")[1].split("DESTINATION")[0]
+
+
 def test_extra_files_rejects_unsupported_type(tmp_path):
     robot = make_demo_robot()
     with pytest.raises(TypeError):
