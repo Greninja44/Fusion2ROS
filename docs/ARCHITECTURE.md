@@ -62,6 +62,8 @@ mklink /D "C:\Users\iamdu\AppData\Roaming\Autodesk\FusionAddins\Fusion2ROS" ^
 
 Editing files in `~/Fusion2ROS/fusion_addin/` from WSL (or any editor) is then immediately visible to Fusion. This requires either an elevated prompt or Windows Developer Mode enabled (for unprivileged `mklink /D`).
 
+**Tried for real on this machine (SHINCHAN) and it didn't work.** `dir`/a direct UNC path/`net use`+drive-letter mapping to `\\wsl.localhost\Ubuntu-26.04\...` all failed ("path invalid" / "network name no longer available") from a genuine Windows cmd.exe process reached via WSL interop, even though `wsl.exe -l -v` correctly reports `Ubuntu-26.04` as the running default distro and basic process interop (launching cmd.exe/wsl.exe from WSL) works fine. Root cause not identified — the P9 network redirector backing `\\wsl.localhost` simply isn't answering in this session. **Fallback in use: `bridge/windows/sync_addin.py`**, a copy-based mirror (`python3 -m bridge.windows.sync_addin`, optionally `--watch`) — not live, must be re-run after editing `fusion_addin/`. If `\\wsl.localhost` starts working on a given machine (e.g. after a WSL/Windows update), try the symlink first; it's strictly better (no separate sync step).
+
 ## Bridge workflow (per project spec)
 
 ```
@@ -90,3 +92,28 @@ See `robot_model/schema.py` for the authoritative definition. Summary: `Robot { 
 8. Manual milestone verification: a simple hand-authored `Robot` fixture (no Fusion needed yet) flows through steps 4–6 and appears in RViz via `ros2 launch <robot> display.launch.py`.
 
 Steps 1, 4, 5, 7 have zero Fusion/ROS runtime dependency and are safe to build and test immediately in this WSL session. Steps 2, 3, 6 need the real Fusion process or a live WSL ROS env to fully verify and should be handed to focused agents/sessions once the schema (step 1) is stable, since they all consume it.
+
+## Status (this session)
+
+All of steps 1–7 are implemented and merged to `main` (103 tests, `python3 -m pytest tests/`). Step 8 was run for real, end to end, against this machine's actual `~/ros2_ws`:
+
+```
+examples/sample_arm.py (hand-authored Robot, no Fusion --
+  see ARCHITECTURE.md step 8's own rationale for why this
+  is the right way to verify the non-Fusion half)
+   -> generate_urdf_xacro -> generate_package
+   -> ros2_tools.validate (URDF + package structure): clean
+   -> copy_package_to_workspace(~/ros2_ws/src/sample_arm)
+   -> colcon build --packages-select sample_arm: BUILD SUCCESS
+```
+Run it yourself: `python3 scripts/run_vertical_slice.py`.
+
+Live ROS verification beyond the build: `xacro`-processed the generated URDF and ran it through `check_urdf` (clean, correct `base_link -> upper_arm -> forearm` tree printed); launched real `robot_state_publisher` against it — `/robot_description`, `/tf`, `/tf_static`, `/joint_states` all appear on the live graph as expected, with one benign, well-known warning (`kdl_parser`: "root link has an inertia specified... KDL does not support a root link with an inertia" — a common, harmless KDL quirk, not a defect in the generated URDF).
+
+**Two real environment gaps found, not code defects:**
+- Neither `joint_state_publisher` nor `joint_state_publisher_gui` is installed on this ROS "lyrical" install, so the generated `display.launch.py` (which references `joint_state_publisher_gui`) fails to launch as-is here. `sudo apt install ros-lyrical-joint-state-publisher-gui` would fix it — not run automatically since installing system packages wasn't asked for.
+- A live RViz2 pixel screenshot could not be captured in this session: WSLg's Wayland compositor doesn't support `wlr-screencopy` (breaks `grim`), and `scrot`/`xdotool` against the XWayland surface consistently produced all-black captures of RViz's GL-rendered window (tried both hardware and `LIBGL_ALWAYS_SOFTWARE=1`) — a known category of issue capturing GL front-buffers through XWayland, not something wrong with the render itself (RViz initialized cleanly at OpenGL 4.5, no render errors). `check_urdf`'s parsed tree + the live `/tf`/`/robot_description` graph are the verification that stood in for a pixel screenshot this session.
+
+**Fusion-side pieces (`fusion_addin/extraction/fusion_adapter.py`, `fusion_addin/generators/mesh.py`, `fusion_addin/Fusion2ROS.py`, `fusion_addin/ui/command.py`) are written against documented Fusion API behavior but UNVERIFIED against a live Fusion process** — this sandbox has no `adsk.core`/`adsk.fusion`. They're synced to this machine's `FusionAddins/Fusion2ROS/` folder (via `bridge/windows/sync_addin.py`, see above) and ready to load in a real Fusion session; that load, plus running "Generate ROS 2 Package" against a real assembly, is the one remaining step that needs a human at the Fusion 360 UI.
+
+One integration finding worth knowing before that test: `FusionDesignReaderAdapter` always returns `None` for a joint's `velocity_limit`/`effort_limit` (Fusion's CAD `Joint` object has no motor/velocity concept), so **every Fusion-extracted revolute/prismatic joint will fail generation** with a clear `PipelineError` (`fusion_addin/app.py`'s `check_missing_actuator_limits`) until something sets those limits — there's no `Actuator`-to-`Joint`-limit wiring yet. That's the natural next piece of work, not a bug to "fix" by inventing values.
