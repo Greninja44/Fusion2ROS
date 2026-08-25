@@ -109,7 +109,7 @@ def _write_package_xml(robot: Robot, pkg_dir: Path) -> None:
 
 
 def _write_cmakelists(robot: Robot, pkg_dir: Path) -> None:
-    content = f"""cmake_minimum_required(VERSION 3.8)
+    content = f"""cmake_minimum_required(VERSION 3.10)
 project({robot.name})
 
 find_package(ament_cmake REQUIRED)
