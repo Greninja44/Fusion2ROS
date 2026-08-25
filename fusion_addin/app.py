@@ -168,6 +168,7 @@ def generate_ros_package(
             generate_kinematics_yaml,
             generate_moveit_controllers_yaml,
             generate_moveit_demo_launch,
+            generate_ompl_planning_yaml,
             generate_srdf,
         )
 
@@ -180,6 +181,9 @@ def generate_ros_package(
         extra_files["config/joint_limits.yaml"] = generate_joint_limits_yaml(robot, moveit_group_name)
         extra_files["config/kinematics.yaml"] = generate_kinematics_yaml(robot, moveit_group_name)
         extra_files["config/moveit_controllers.yaml"] = generate_moveit_controllers_yaml(robot, moveit_group_name)
+        # move_group won't start at all without a planning pipeline
+        # registered -- see generate_ompl_planning_yaml's docstring.
+        extra_files["config/ompl_planning.yaml"] = generate_ompl_planning_yaml()
         # moveit.py defaults to assuming a separate "<robot>_moveit_config"
         # package (the real-world moveit_setup_assistant convention) -- this
         # pipeline puts every generator's output into ONE combined package

@@ -405,6 +405,47 @@ def generate_moveit_controllers_yaml(robot: Robot, group_name: str = "arm") -> s
     return "\n".join(lines) + "\n"
 
 
+def generate_ompl_planning_yaml() -> str:
+    """Return the OMPL planning-pipeline registration `move_group` requires
+    to start at all -- confirmed for real (not merely "simplified", the
+    original documented scope for this generator) that `move_group` throws
+    `std::runtime_error("Planning plugin name is empty or not defined in
+    namespace 'move_group'. Please choose one of the available plugins:
+    chomp_interface/CHOMPPlanner, ompl_interface/OMPLPlanner,
+    pilz_industrial_motion_planner/CommandPlanner, stomp_moveit/StompPlanner")`
+    and terminates immediately if NO planning pipeline is registered at all --
+    this isn't tunable-but-optional the way OMPL's per-algorithm
+    `planner_configs` presets are, it's a hard startup requirement.
+
+    Content matches this environment's actually-installed
+    `moveit_configs_utils/default_configs/ompl_planning.yaml` verbatim
+    (`planning_plugins`/`request_adapters`/`response_adapters` -- the
+    `ompl_defaults.yaml` `planner_configs` block, ~130 lines of generic
+    per-algorithm OMPL tuning parameters unrelated to any specific robot, is
+    deliberately not duplicated here: it's not required for `move_group` to
+    start or plan with the default planner, only to select a *specific*
+    named algorithm/tuning by `planner_id` -- a real future enhancement,
+    not something to invent values for now).
+
+    No robot-specific data, so this takes no `robot` parameter and returns
+    identical content for every robot -- unlike every other generator in
+    this module.
+    """
+    return (
+        "planning_plugins:\n"
+        "  - ompl_interface/OMPLPlanner\n"
+        "request_adapters:\n"
+        "  - default_planning_request_adapters/ResolveConstraintFrames\n"
+        "  - default_planning_request_adapters/ValidateWorkspaceBounds\n"
+        "  - default_planning_request_adapters/CheckStartStateBounds\n"
+        "  - default_planning_request_adapters/CheckStartStateCollision\n"
+        "response_adapters:\n"
+        "  - default_planning_response_adapters/AddTimeOptimalParameterization\n"
+        "  - default_planning_response_adapters/ValidateSolution\n"
+        "  - default_planning_response_adapters/DisplayMotionPath\n"
+    )
+
+
 # --- 6. demo launch file -------------------------------------------------------
 
 
@@ -531,6 +572,17 @@ def generate_launch_description():
         "moveit_controller_manager": "moveit_simple_controller_manager/MoveItSimpleControllerManager",
     }}
 
+    # move_group throws std::runtime_error and terminates immediately with
+    # no planning pipeline registered at all -- confirmed for real, not a
+    # tunable simplification. See generate_ompl_planning_yaml's docstring in
+    # fusion_addin/generators/moveit.py.
+    ompl_yaml = _load_yaml(MOVEIT_CONFIG_PACKAGE, "config/ompl_planning.yaml")
+    planning_pipeline_config = {{
+        "planning_pipelines": ["ompl"],
+        "default_planning_pipeline": "ompl",
+        "ompl": ompl_yaml,
+    }}
+
     move_group_node = Node(
         package="moveit_ros_move_group",
         executable="move_group",
@@ -541,6 +593,7 @@ def generate_launch_description():
             robot_description_kinematics,
             robot_description_planning,
             moveit_controllers,
+            planning_pipeline_config,
             {{"allow_trajectory_execution": True}},
             {{"publish_monitored_planning_scene": True}},
         ],

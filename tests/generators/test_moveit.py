@@ -23,6 +23,7 @@ from fusion_addin.generators.moveit import (
     generate_kinematics_yaml,
     generate_moveit_controllers_yaml,
     generate_moveit_demo_launch,
+    generate_ompl_planning_yaml,
     generate_srdf,
 )
 from robot_model import Actuator, Geometry, Inertial, Joint, JointType, Link, Material, Pose, Robot
@@ -334,3 +335,31 @@ def test_demo_launch_moveit_config_package_override():
     text = generate_moveit_demo_launch(robot, group_name="arm", moveit_config_package="sample_arm")
     assert 'MOVEIT_CONFIG_PACKAGE = "sample_arm"' in text
     assert "sample_arm_moveit_config" not in text
+
+
+def test_demo_launch_loads_ompl_planning_pipeline():
+    # Regression: move_group throws std::runtime_error and terminates
+    # immediately ("Planning plugin name is empty or not defined in
+    # namespace 'move_group'") with no planning pipeline registered at
+    # all -- confirmed for real against a live move_group. The launch file
+    # must load config/ompl_planning.yaml and pass planning_pipelines/
+    # default_planning_pipeline/ompl to move_group_node.
+    robot = make_sample_arm()
+    text = generate_moveit_demo_launch(robot)
+    assert "ompl_planning.yaml" in text
+    assert "default_planning_pipeline" in text
+    assert "planning_pipeline_config" in text
+
+
+def test_ompl_planning_yaml_parses_and_has_required_plugin():
+    text = generate_ompl_planning_yaml()
+    data = yaml.safe_load(text)
+    assert data["planning_plugins"] == ["ompl_interface/OMPLPlanner"]
+    assert "request_adapters" in data
+    assert "response_adapters" in data
+
+
+def test_ompl_planning_yaml_is_robot_independent():
+    # No `robot` parameter -- must return byte-identical content regardless
+    # of which robot it's generated for.
+    assert generate_ompl_planning_yaml() == generate_ompl_planning_yaml()

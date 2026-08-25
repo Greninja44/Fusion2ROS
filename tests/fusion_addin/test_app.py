@@ -235,6 +235,11 @@ def test_generate_ros_package_with_moveit_suitable(tmp_path):
     assert (package_dir / "config" / "joint_limits.yaml").exists()
     assert (package_dir / "config" / "kinematics.yaml").exists()
     assert (package_dir / "config" / "moveit_controllers.yaml").exists()
+    # Regression: move_group won't start without this (see
+    # generate_ompl_planning_yaml's docstring) -- confirmed for real.
+    assert (package_dir / "config" / "ompl_planning.yaml").exists()
+    launch_text = (package_dir / "launch" / "moveit_demo.launch.py").read_text()
+    assert f'MOVEIT_CONFIG_PACKAGE = "{robot.name}"' in launch_text
     assert (package_dir / "launch" / "moveit_demo.launch.py").exists()
 
 
