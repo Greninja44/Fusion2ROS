@@ -323,3 +323,14 @@ def test_demo_launch_references_expected_names():
     assert "sample_arm_moveit_config" in text
     assert "sample_arm.srdf" in text
     assert "generate_launch_description" in text
+
+
+def test_demo_launch_moveit_config_package_override():
+    # fusion_addin/app.py's integration puts every generator's output into
+    # ONE combined package rather than a separate "<robot>_moveit_config"
+    # package -- confirmed for real that move_group fails to find the
+    # default name in that setup, hence this override parameter.
+    robot = make_sample_arm()
+    text = generate_moveit_demo_launch(robot, group_name="arm", moveit_config_package="sample_arm")
+    assert 'MOVEIT_CONFIG_PACKAGE = "sample_arm"' in text
+    assert "sample_arm_moveit_config" not in text

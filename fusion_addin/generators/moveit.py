@@ -408,7 +408,9 @@ def generate_moveit_controllers_yaml(robot: Robot, group_name: str = "arm") -> s
 # --- 6. demo launch file -------------------------------------------------------
 
 
-def generate_moveit_demo_launch(robot: Robot, group_name: str = "arm") -> str:
+def generate_moveit_demo_launch(
+    robot: Robot, group_name: str = "arm", moveit_config_package: Optional[str] = None
+) -> str:
     """Return the Python source text of a `launch`/`launch_ros` launch
     file starting `move_group` and `rviz2` for `robot`.
 
@@ -441,11 +443,16 @@ def generate_moveit_demo_launch(robot: Robot, group_name: str = "arm") -> str:
         actually writing those files into that layout is
         fusion_addin/generators/package.py's job (not this module's);
         this launch file only encodes the assumption of where they'll be.
+        Pass `moveit_config_package` to override this default (e.g.
+        Fusion2ROS's own integration in fusion_addin/app.py writes every
+        generator's output into ONE combined `<robot>` package rather than
+        splitting out a separate `<robot>_moveit_config` package, so it
+        passes `moveit_config_package=robot.name` here to match).
     """
     robot.validate()
 
     description_package = robot.name
-    moveit_config_package = f"{robot.name}_moveit_config"
+    moveit_config_package = moveit_config_package or f"{robot.name}_moveit_config"
     srdf_file = f"{robot.name}.srdf"
 
     content = f'''"""MoveIt 2 demo launch file for "{robot.name}" (planning group "{group_name}").

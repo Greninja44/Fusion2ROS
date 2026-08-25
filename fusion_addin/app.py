@@ -180,7 +180,15 @@ def generate_ros_package(
         extra_files["config/joint_limits.yaml"] = generate_joint_limits_yaml(robot, moveit_group_name)
         extra_files["config/kinematics.yaml"] = generate_kinematics_yaml(robot, moveit_group_name)
         extra_files["config/moveit_controllers.yaml"] = generate_moveit_controllers_yaml(robot, moveit_group_name)
-        extra_files["launch/moveit_demo.launch.py"] = generate_moveit_demo_launch(robot, moveit_group_name)
+        # moveit.py defaults to assuming a separate "<robot>_moveit_config"
+        # package (the real-world moveit_setup_assistant convention) -- this
+        # pipeline puts every generator's output into ONE combined package
+        # instead, so override it to match where the SRDF/kinematics/etc.
+        # files above actually land (found via a real move_group launch
+        # that failed to find "sample_arm_moveit_config" until this was added).
+        extra_files["launch/moveit_demo.launch.py"] = generate_moveit_demo_launch(
+            robot, moveit_group_name, moveit_config_package=robot.name
+        )
 
     if include_nav2:
         from .generators.nav2 import (
