@@ -61,12 +61,16 @@ def check_missing_actuator_limits(robot: Robot) -> List[str]:
 
 
 def attach_mesh_references(robot: Robot, mesh_files: Dict[str, Path]) -> Robot:
-    """Sets visual_geometry/collision_geometry (both -- same mesh for MVP; a
-    separate simplified collision mesh is a documented future enhancement,
-    not attempted here) on each link named in mesh_files, using a
+    """Sets visual_geometry/collision_geometry (both -- same full-resolution
+    mesh, by default) on each link named in mesh_files, using a
     package://<robot.name>/meshes/<filename> reference. Mutates and returns
     `robot`. Links not present in mesh_files are left untouched (no visual --
-    e.g. a purely structural/reference link with no exportable body)."""
+    e.g. a purely structural/reference link with no exportable body).
+
+    Callers that want a cheaper collision proxy instead of the full mesh
+    should call attach_collision_proxies(robot, use_bounding_box_collision=True)
+    afterward (generate_ros_package does this automatically when its own
+    use_bounding_box_collision parameter is set)."""
     from robot_model import Geometry
 
     for link in robot.links:
@@ -80,10 +84,56 @@ def attach_mesh_references(robot: Robot, mesh_files: Dict[str, Path]) -> Robot:
     return robot
 
 
-def generate_ros_package(robot: Robot, mesh_files: Dict[str, Path], output_dir: Path) -> Path:
+def attach_collision_proxies(robot: Robot, use_bounding_box_collision: bool = False) -> Robot:
+    """Optionally replaces each link's collision_geometry with a cheap
+    axis-aligned box proxy derived from its Fusion bounding box, instead of
+    reusing the full-resolution visual mesh (attach_mesh_references' default).
+    Full-mesh collision is expensive for a physics engine (Gazebo/Bullet/ODE)
+    and usually unnecessary -- a bounding-box proxy is standard, well-known
+    real-world practice.
+
+    Only touches links that have a "bounding_box_size" key in `metadata`
+    (populated by fusion_addin/extraction/converter.py's build_robot_model
+    for Fusion-sourced links only -- see FusionOccurrence.bounding_box). A
+    hand-authored Robot (e.g. examples/sample_arm.py) has no such metadata
+    and is left completely untouched, keeping whatever collision_geometry it
+    already had. visual_geometry is never modified here.
+
+    No-op (robot returned unchanged) when use_bounding_box_collision is
+    False -- the default, so every existing caller keeps its current
+    full-mesh-collision behavior unless it opts in.
+
+    Simplification, documented same as converter.py's _bounding_box_size:
+    the box is world-axis-aligned, not rotated to the link's own local frame.
+    """
+    if not use_bounding_box_collision:
+        return robot
+
+    from robot_model import Geometry
+
+    for link in robot.links:
+        size = link.metadata.get("bounding_box_size")
+        if size is None:
+            continue
+        link.collision_geometry = Geometry(kind="box", size=size)
+    return robot
+
+
+def generate_ros_package(
+    robot: Robot,
+    mesh_files: Dict[str, Path],
+    output_dir: Path,
+    use_bounding_box_collision: bool = False,
+) -> Path:
     """robot -> URDF/Xacro text -> full ROS 2 package tree under
     output_dir/<robot.name>/. Raises PipelineError (not a bare ValueError)
-    with the full itemized list if any joint is missing required limits."""
+    with the full itemized list if any joint is missing required limits.
+
+    use_bounding_box_collision (default False, opt-in): after mesh references
+    are attached, replace collision_geometry with a simplified bounding-box
+    proxy for links that have one available (see attach_collision_proxies).
+    Left False, output is byte-identical to before this parameter existed.
+    """
     problems = check_missing_actuator_limits(robot)
     if problems:
         raise PipelineError(
@@ -93,6 +143,7 @@ def generate_ros_package(robot: Robot, mesh_files: Dict[str, Path], output_dir: 
         )
 
     attach_mesh_references(robot, mesh_files)
+    attach_collision_proxies(robot, use_bounding_box_collision)
     urdf_xacro = generate_urdf_xacro(robot)
     # mesh_files here is keyed by link name (export_link_meshes' contract);
     # generate_package wants it keyed by the mesh's relative filename inside
@@ -107,6 +158,7 @@ def run_pipeline(
     robot_name: str,
     output_dir: Path,
     mesh_files: Optional[Dict[str, Path]] = None,
+    use_bounding_box_collision: bool = False,
 ) -> tuple:
     """Full pipeline: FusionDesignReader -> Robot -> generated package.
     Returns (robot, package_dir). `mesh_files` is supplied by the caller
@@ -114,7 +166,12 @@ def run_pipeline(
     the live Design before this is called -- kept as a separate step here
     since mesh export needs the live adsk Design/Occurrence objects that
     FusionDesignReader's plain-data abstraction deliberately doesn't carry).
+
+    use_bounding_box_collision (default False, opt-in): forwarded to
+    generate_ros_package -- see its docstring.
     """
     robot = build_robot_from_reader(reader, robot_name)
-    package_dir = generate_ros_package(robot, mesh_files or {}, Path(output_dir))
+    package_dir = generate_ros_package(
+        robot, mesh_files or {}, Path(output_dir), use_bounding_box_collision=use_bounding_box_collision
+    )
     return robot, package_dir
