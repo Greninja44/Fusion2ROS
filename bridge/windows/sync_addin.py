@@ -19,6 +19,14 @@ Not live -- you must re-run it (or use --watch) after editing fusion_addin/
 for Fusion to see the change. Only touches *.py files it manages; anything
 Fusion itself writes into the destination (e.g. its own __pycache__) is left
 alone except pycache, which is always pruned since it's derived, not source.
+
+Also deploys three repo-root packages that fusion_addin/ imports by absolute
+name (bridge/windows/, robot_model/, ros2_tools/validate/) into the same
+destination folder, since none of them are otherwise on Fusion's Python's
+sys.path -- see each sync_*_into() function below for which real bug it
+fixes (all three were found the same way: a ModuleNotFoundError live in
+Fusion, reproduced by simulating Fusion's sys.path against the deployed
+copy).
 """
 
 from __future__ import annotations
@@ -29,7 +37,41 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_SOURCE = Path(__file__).resolve().parents[2] / "fusion_addin"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SOURCE = REPO_ROOT / "fusion_addin"
+# bridge/windows/ itself is needed inside the deployed add-in folder:
+# fusion_addin/ui/build_command.py and launch_command.py do
+# `from bridge.windows.detect import ...` / `from bridge.windows.invoke
+# import ...` -- an ABSOLUTE import, which only resolves if a `bridge/`
+# package sits somewhere on Fusion's Python's sys.path. It never did before
+# this was added (a real bug, found live in Fusion: "ModuleNotFoundError:
+# No module named 'bridge'", raised from build_command.py at add-in load
+# time -- see fusion_addin/Fusion2ROS.py's docstring for the full story and
+# the matching sys.path fix on that side). bridge/wsl_side/ is NOT deployed
+# here -- bridge/windows/__init__.py's own docstring confirms
+# bridge/windows/ never imports it, and it wouldn't work under Windows
+# Python anyway (it shells out to `colcon`/`bash`, Linux-only tools).
+BRIDGE_WINDOWS_SOURCE = REPO_ROOT / "bridge" / "windows"
+BRIDGE_INIT_SOURCE = REPO_ROOT / "bridge" / "__init__.py"
+# Same underlying bug, same fix shape: fusion_addin/app.py and every
+# fusion_addin/generators/*.py and fusion_addin/extraction/converter.py do
+# `from robot_model import ...` -- also an ABSOLUTE import of a repo-root
+# package that was never deployed alongside fusion_addin/. Confirmed live
+# by re-running the exact sys.path-simulation repro used to find the
+# `bridge` bug against the deployed copy AFTER that first fix: it got
+# past the bridge import and immediately hit
+# "ModuleNotFoundError: No module named 'robot_model'" instead.
+ROBOT_MODEL_SOURCE = REPO_ROOT / "robot_model"
+# fusion_addin/ui/validate_command.py does `from ros2_tools.validate.package
+# import ...` / `from ros2_tools.validate.urdf import ...` -- same bug again.
+# validate_command.py's own docstring already flags this as a deliberate,
+# one-off exception to the "fusion_addin never imports ros2_tools" layering
+# rule specifically because ros2_tools.validate is pure-stdlib (no adsk, no
+# live ROS env needed), so it's safe to deploy; only the validate/
+# subpackage is needed, not all of ros2_tools (e.g. nothing else under
+# ros2_tools is pure-stdlib/Windows-safe).
+ROS2_TOOLS_VALIDATE_SOURCE = REPO_ROOT / "ros2_tools" / "validate"
+ROS2_TOOLS_INIT_SOURCE = REPO_ROOT / "ros2_tools" / "__init__.py"
 
 
 def sync_addin_to_fusion(source_dir: Path, dest_dir: Path) -> Path:
@@ -79,6 +121,41 @@ def sync_addin_to_fusion(source_dir: Path, dest_dir: Path) -> Path:
     return dest_dir
 
 
+def sync_bridge_windows_into(dest_dir: Path) -> None:
+    """Deploys the self-contained `bridge/windows/` subpackage (plus a
+    `bridge/__init__.py`) into `dest_dir/bridge/windows/` and
+    `dest_dir/bridge/__init__.py`, so the add-in folder can `import
+    bridge.windows.detect` / `import bridge.windows.invoke` on its own --
+    see this module's BRIDGE_WINDOWS_SOURCE comment for why this exists.
+    Reuses sync_addin_to_fusion for the directory-mirror semantics (removes
+    stale files, prunes __pycache__) rather than a bespoke copy.
+    """
+    dest_dir = Path(dest_dir)
+    sync_addin_to_fusion(BRIDGE_WINDOWS_SOURCE, dest_dir / "bridge" / "windows")
+    (dest_dir / "bridge").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(BRIDGE_INIT_SOURCE, dest_dir / "bridge" / "__init__.py")
+
+
+def sync_robot_model_into(dest_dir: Path) -> None:
+    """Deploys the pure-stdlib `robot_model/` package into
+    `dest_dir/robot_model/`, so `app.py` and `generators/*.py`'s absolute
+    `from robot_model import ...` resolve -- see ROBOT_MODEL_SOURCE's
+    comment for why this exists."""
+    sync_addin_to_fusion(ROBOT_MODEL_SOURCE, Path(dest_dir) / "robot_model")
+
+
+def sync_ros2_tools_validate_into(dest_dir: Path) -> None:
+    """Deploys `ros2_tools/validate/` (plus a `ros2_tools/__init__.py`) into
+    `dest_dir/ros2_tools/validate/`, so validate_command.py's absolute
+    `from ros2_tools.validate.{package,urdf} import ...` resolve -- see
+    ROS2_TOOLS_VALIDATE_SOURCE's comment for why only this subpackage is
+    deployed rather than all of ros2_tools."""
+    dest_dir = Path(dest_dir)
+    sync_addin_to_fusion(ROS2_TOOLS_VALIDATE_SOURCE, dest_dir / "ros2_tools" / "validate")
+    (dest_dir / "ros2_tools").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROS2_TOOLS_INIT_SOURCE, dest_dir / "ros2_tools" / "__init__.py")
+
+
 def _default_windows_addins_dir() -> Path:
     """Best-effort default: /mnt/c/Users/<user>/AppData/Roaming/Autodesk/FusionAddins.
     Only reliable when run from WSL against a drvfs-mounted C:; pass --dest
@@ -120,15 +197,24 @@ def main(argv=None) -> int:
         addins_dir = _default_windows_addins_dir()
         dest = addins_dir / "Fusion2ROS"
 
-    sync_addin_to_fusion(args.source, dest)
+    def _sync_all() -> None:
+        sync_addin_to_fusion(args.source, dest)
+        sync_bridge_windows_into(dest)
+        sync_robot_model_into(dest)
+        sync_ros2_tools_validate_into(dest)
+
+    _sync_all()
     print(f"Synced {args.source} -> {dest}")
+    print(f"Synced {BRIDGE_WINDOWS_SOURCE} -> {dest / 'bridge' / 'windows'}")
+    print(f"Synced {ROBOT_MODEL_SOURCE} -> {dest / 'robot_model'}")
+    print(f"Synced {ROS2_TOOLS_VALIDATE_SOURCE} -> {dest / 'ros2_tools' / 'validate'}")
 
     if args.watch:
         print(f"Watching for changes every {args.interval}s (Ctrl-C to stop)...")
         try:
             while True:
                 time.sleep(args.interval)
-                sync_addin_to_fusion(args.source, dest)
+                _sync_all()
         except KeyboardInterrupt:
             print("Stopped.")
     return 0
