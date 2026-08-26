@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit tests (no ROS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install pytest pyyaml
+
+      - name: Run test suite
+        run: python3 -m pytest tests/ -v
+
+  ros-integration:
+    name: Unit tests + colcon build (ROS 2 Jazzy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+
+      - name: Install extra ROS packages exercised by the generators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ros-jazzy-ros2-control \
+            ros-jazzy-ros2-controllers \
+            ros-jazzy-gz-ros2-control \
+            ros-jazzy-nav2-amcl \
+            ros-jazzy-nav2-bt-navigator \
+            ros-jazzy-nav2-controller \
+            ros-jazzy-nav2-planner \
+            ros-jazzy-nav2-map-server \
+            ros-jazzy-nav2-lifecycle-manager \
+            ros-jazzy-nav2-behaviors \
+            ros-jazzy-nav2-waypoint-follower \
+            ros-jazzy-nav2-velocity-smoother \
+            ros-jazzy-moveit \
+            ros-jazzy-moveit-configs-utils \
+            ros-jazzy-joint-state-publisher-gui \
+            python3-colcon-common-extensions
+
+      - name: Run test suite with ROS sourced
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          python3 -m pytest tests/ -v
+        shell: bash
+
+      - name: Run the full vertical-slice generation script
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          mkdir -p /tmp/ci_ros2_ws/src
+          python3 - <<'EOF'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, ".")
+          from examples.sample_arm import build_sample_arm
+          from examples.sample_rover import build_sample_rover
+          from fusion_addin.app import generate_ros_package
+          from bridge.wsl_side.build import colcon_build, copy_package_to_workspace
+
+          ros_ws = Path("/tmp/ci_ros2_ws")
+          for robot, kwargs in [
+              (build_sample_arm(), dict(include_ros2_control=True, include_moveit=True)),
+              (build_sample_rover(), dict(include_ros2_control=True, include_gazebo=True, include_nav2=True)),
+          ]:
+              pkg_dir = generate_ros_package(robot, {}, Path("output"), **kwargs)
+              copy_package_to_workspace(pkg_dir, ros_ws / "src")
+              result = colcon_build(ros_ws, robot.name, ros_setup=Path("/opt/ros/jazzy/setup.bash"))
+              print(result.stdout)
+              if not result.success:
+                  print(result.stderr, file=sys.stderr)
+                  sys.exit(1)
+              print(f"BUILD SUCCESS: {robot.name}")
+          EOF
+        shell: bash
+
+      - name: Validate URDF with check_urdf
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          xacro /tmp/ci_ros2_ws/src/sample_arm/urdf/sample_arm.urdf.xacro > /tmp/sample_arm.urdf
+          check_urdf /tmp/sample_arm.urdf
+        shell: bash
