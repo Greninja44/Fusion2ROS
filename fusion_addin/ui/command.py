@@ -422,6 +422,30 @@ class GenerateCommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             inputs.addBoolValueInput("include_nav2", "Nav2", True, "", False)
             inputs.addStringValueInput("moveit_group_name", "MoveIt planning group (if MoveIt 2 checked)", "arm")
 
+            # REAL GAP FOUND AND FIXED HERE: app.generate_ros_package's
+            # use_bounding_box_collision flag (app.attach_collision_proxies)
+            # was never exposed here at all, so it was always False from the
+            # real add-in -- every Fusion-sourced link kept full-mesh
+            # collision geometry unconditionally. Nav2's footprint-radius
+            # computation (generators/nav2.py's compute_footprint_radius)
+            # explicitly refuses to measure a mesh (it can't know a mesh's
+            # true extent) and requires at least one link with a box/
+            # cylinder/sphere primitive -- so Nav2 generation was UNREACHABLE
+            # from the Fusion UI even after correctly declaring a drivetrain,
+            # for every robot whose links are all meshes (i.e. every
+            # Fusion-sourced robot, always). Defaulting this ON (unlike
+            # generate_ros_package's own default of False, kept for
+            # non-Fusion callers like the CLI/tests) since Nav2/Gazebo both
+            # want cheap collision proxies anyway and a Fusion user has no
+            # other way to attach primitive collision geometry today.
+            inputs.addBoolValueInput(
+                "use_bounding_box_collision",
+                "Use bounding-box collision proxies (required for Nav2)",
+                True,
+                "",
+                True,
+            )
+
             # REAL GAP FOUND AND FIXED HERE: robot.metadata["drivetrain"] --
             # the convention ros2_control.py/nav2.py use to recognize a
             # differential-drive or mecanum-drive mobile base (see
@@ -589,6 +613,7 @@ class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
             include_moveit = inputs.itemById("include_moveit").value
             include_nav2 = inputs.itemById("include_nav2").value
             moveit_group_name = inputs.itemById("moveit_group_name").value.strip() or "arm"
+            use_bounding_box_collision = inputs.itemById("use_bounding_box_collision").value
 
             fusion_app = adsk.core.Application.get()
             design = adsk.fusion.Design.cast(fusion_app.activeProduct)
@@ -635,6 +660,7 @@ class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
                     include_moveit=include_moveit,
                     include_nav2=include_nav2,
                     moveit_group_name=moveit_group_name,
+                    use_bounding_box_collision=use_bounding_box_collision,
                     progress_callback=_on_progress,
                     should_cancel=_should_cancel,
                 )
