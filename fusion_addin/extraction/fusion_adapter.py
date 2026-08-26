@@ -248,13 +248,31 @@ def _slider_info(motion) -> tuple:  # motion: adsk.fusion.SliderJointMotion
     return axis, lower, upper
 
 
+def _joint_motion_kinematics(motion) -> tuple:  # motion: adsk.fusion.JointMotion
+    """Shared between a regular Joint and an AsBuiltJoint -- both expose
+    `.jointMotion` as the same JointMotion-derived object hierarchy
+    (JointMotion_jointType.htm documents `jointType` on the base JointMotion
+    type itself, not per-subtype), so the same dispatch applies to either.
+    Confirmed via JointMotion_jointType.htm as in the original (pre-As-Built)
+    version of this function; see its history for that citation.
+    """
+    joint_type_str = motion.jointType.name  # UNCONFIRMED: JointTypes enum member -> str via .name
+
+    axis: Optional[Vec3] = None
+    lower: Optional[float] = None
+    upper: Optional[float] = None
+    if joint_type_str == "RevoluteJointType":
+        axis, lower, upper = _revolute_info(motion)
+    elif joint_type_str == "SliderJointType":
+        axis, lower, upper = _slider_info(motion)
+    # Rigid and the unsupported multi-DOF types carry no axis/limits here;
+    # converter.py raises a clear error for the unsupported ones.
+    return joint_type_str, axis, lower, upper
+
+
 def _joint_to_fusion_joint_info(joint) -> FusionJointInfo:  # joint: adsk.fusion.Joint
     """Confirmed via Joint.htm: `name`, `occurrenceOne`, `occurrenceTwo`,
-    `jointMotion`, `geometryOrOriginOne`. `jointMotion.jointType` is
-    confirmed via JointMotion_jointType.htm to return a `JointTypes` enum
-    value; we convert it to our string form via its `.name` attribute
-    (standard for Fusion API enums exposed to Python) -- NOT independently
-    confirmed for JointTypes specifically.
+    `jointMotion`, `geometryOrOriginOne`.
 
     UNCERTAIN (design decision, not an API fact): the Fusion Joint API does
     not itself label occurrenceOne/occurrenceTwo as "parent"/"child" -- see
@@ -262,19 +280,7 @@ def _joint_to_fusion_joint_info(joint) -> FusionJointInfo:  # joint: adsk.fusion
     occurrenceOne as the parent side. If a real assembly's joints turn out
     to be authored the other way around in practice, swap this mapping.
     """
-    motion = joint.jointMotion
-    joint_type_str = motion.jointType.name  # UNCONFIRMED: JointTypes enum member -> str via .name
-
-    axis: Optional[Vec3] = None
-    lower: Optional[float] = None
-    upper: Optional[float] = None
-    if joint_type_str in ("RevoluteJointType",):
-        axis, lower, upper = _revolute_info(motion)
-    elif joint_type_str in ("SliderJointType",):
-        axis, lower, upper = _slider_info(motion)
-    # Rigid and the unsupported multi-DOF types carry no axis/limits here;
-    # converter.py raises a clear error for the unsupported ones.
-
+    joint_type_str, axis, lower, upper = _joint_motion_kinematics(joint.jointMotion)
     origin = _joint_geometry_pose(joint.geometryOrOriginOne)
 
     return FusionJointInfo(
@@ -291,19 +297,66 @@ def _joint_to_fusion_joint_info(joint) -> FusionJointInfo:  # joint: adsk.fusion
     )
 
 
+def _as_built_joint_to_fusion_joint_info(joint) -> FusionJointInfo:  # joint: adsk.fusion.AsBuiltJoint
+    """REAL BUG FOUND AND FIXED HERE (from a live Fusion session: an arm
+    assembly with clearly-named per-axis occurrences reported ZERO joints
+    detected, because every one of its joints turned out to be an As-Built
+    Joint -- a completely separate Fusion collection/object type from a
+    regular Joint, and the original version of this file only ever read
+    `Component.allJoints`, never `Component.allAsBuiltJoints`. As-Built
+    Joints are a very common, standard Fusion workflow (capture an already-
+    positioned pair of occurrences' relationship as a joint, rather than
+    picking geometry up front) -- especially likely for assemblies imported
+    from another CAD system or built by dragging parts into place first.
+
+    Confirmed via AsBuiltJoint.htm: `name`, `occurrenceOne`, `occurrenceTwo`,
+    `jointMotion` (same JointMotion object hierarchy as a regular Joint, so
+    _joint_motion_kinematics applies unchanged). Origin is actually SIMPLER
+    than a regular Joint here: AsBuiltJoint exposes `.transform` directly
+    ("Returns the position and orientation of the joint geometry associated
+    with this as-built joint" -- a Matrix3D with origin + X/Y/Z axis
+    vectors), the exact same shape `_matrix3d_to_pose` already converts
+    occurrence poses from, so no JointGeometry/JointOrigin fallback (see
+    _joint_geometry_pose's own uncertainty notes -- those apply only to a
+    regular Joint's geometryOrOriginOne/Two, not to this) is needed.
+
+    Same UNCERTAIN caveat as _joint_to_fusion_joint_info re: which side is
+    "parent" -- occurrenceOne is taken as the parent here too, for the same
+    reason and with the same unresolved risk of being backwards in practice.
+    """
+    joint_type_str, axis, lower, upper = _joint_motion_kinematics(joint.jointMotion)
+    origin = _matrix3d_to_pose(joint.transform)
+
+    return FusionJointInfo(
+        name=joint.name,
+        joint_type=joint_type_str,
+        occurrence_one=joint.occurrenceOne.name,
+        occurrence_two=joint.occurrenceTwo.name,
+        origin=origin,
+        axis=axis,
+        lower_limit=lower,
+        upper_limit=upper,
+        velocity_limit=None,
+        effort_limit=None,
+    )
+
+
 class FusionDesignReaderAdapter(FusionDesignReader):
     """Real FusionDesignReader backed by a live `adsk.fusion.Design`.
 
     Confirmed via Design_rootComponent.htm: `Design.rootComponent` returns
     the root Component. Confirmed via Component.htm: `Component.allJoints`
-    ("Returns all joints in this component and any sub components") and
-    `Component.allOccurrences` ("Returns all of the occurrences in the
-    assembly regardless of their level within the assembly structure") are
-    both real, documented properties of `Component` -- not just of the
-    design's root component specifically, which is what makes the optional
-    `root_component` scoping parameter below valid: any Component (e.g. one
-    reached via a selected Occurrence's `.component`) supports the same two
-    properties, not only `design.rootComponent`.
+    ("Returns all joints in this component and any sub components"),
+    `Component.allAsBuiltJoints` (same description, for As-Built Joints --
+    see _as_built_joint_to_fusion_joint_info for why this is a SEPARATE
+    collection that must be read independently), and `Component.allOccurrences`
+    ("Returns all of the occurrences in the assembly regardless of their
+    level within the assembly structure") are all real, documented
+    properties of `Component` -- not just of the design's root component
+    specifically, which is what makes the optional `root_component` scoping
+    parameter below valid: any Component (e.g. one reached via a selected
+    Occurrence's `.component`) supports the same properties, not only
+    `design.rootComponent`.
     """
 
     def __init__(self, design=None, root_component=None):
@@ -337,4 +390,10 @@ class FusionDesignReaderAdapter(FusionDesignReader):
         return [_occurrence_to_fusion_occurrence(occ) for occ in self._root.allOccurrences]
 
     def list_joints(self) -> List[FusionJointInfo]:
-        return [_joint_to_fusion_joint_info(j) for j in self._root.allJoints]
+        # Two entirely separate Fusion collections -- see
+        # _as_built_joint_to_fusion_joint_info's docstring for the real bug
+        # (an assembly whose joints were all As-Built Joints reported zero
+        # joints detected) this combination fixes.
+        regular = [_joint_to_fusion_joint_info(j) for j in self._root.allJoints]
+        as_built = [_as_built_joint_to_fusion_joint_info(j) for j in self._root.allAsBuiltJoints]
+        return regular + as_built
