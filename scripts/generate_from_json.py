@@ -68,8 +68,13 @@ def generate_one(robot_json: Path, output_dir: Path, include_kwargs: dict) -> bo
 
     print(f"Loaded {robot.name!r} (from {robot_json}): {len(robot.links)} links, {len(robot.joints)} joints -- valid")
 
+    def _print_progress(stage_description: str, step: int, total: int) -> None:
+        print(f"  [{step}/{total}] {stage_description}")
+
     try:
-        package_dir = generate_ros_package(robot, mesh_files={}, output_dir=output_dir, **include_kwargs)
+        package_dir = generate_ros_package(
+            robot, mesh_files={}, output_dir=output_dir, progress_callback=_print_progress, **include_kwargs
+        )
     except PipelineError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return False

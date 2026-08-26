@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
+
+ProgressCallback = Callable[[str, int, int], None]
 
 from robot_model import Robot, JointType
 
@@ -183,6 +185,7 @@ def generate_ros_package(
     include_nav2: bool = False,
     moveit_group_name: str = "arm",
     use_bounding_box_collision: bool = False,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Path:
     """robot -> URDF/Xacro text -> full ROS 2 package tree under
     output_dir/<robot.name>/. Raises PipelineError (not a bare ValueError)
@@ -200,7 +203,41 @@ def generate_ros_package(
     are attached, replace collision_geometry with a simplified bounding-box
     proxy for links that have one available (see attach_collision_proxies).
     Left False, output is byte-identical to before this parameter existed.
+
+    progress_callback (default None, opt-in): if given, called as
+    `callback(stage_description, step_number, total_steps)` once per stage
+    (1-indexed step_number, `total_steps` fixed for the whole call and
+    computed up front from which include_* flags are set, so a caller can
+    render a determinate progress bar rather than a spinner). Exists so the
+    Fusion UI can drive a real adsk.core.ProgressDialog during generation
+    instead of appearing to hang (generation of a complex robot with many
+    optional outputs is not instantaneous), and so the standalone CLI
+    (scripts/generate_from_json.py) can print progress for a large batch.
+    Never called with a partially-failed stage -- if a stage raises, this
+    function raises too, mid-callback-sequence, exactly where the error
+    actually occurred.
     """
+    total_steps = 3  # validate+mesh, URDF, write-to-disk -- always present
+    if include_ros2_control:
+        total_steps += 1
+    if include_gazebo:
+        total_steps += 1
+        if robot.sensors:
+            total_steps += 1
+    if include_moveit:
+        total_steps += 1
+    if include_nav2:
+        total_steps += 1
+
+    step = 0
+
+    def _report(stage_description: str) -> None:
+        nonlocal step
+        step += 1
+        if progress_callback is not None:
+            progress_callback(stage_description, step, total_steps)
+
+    _report("Checking actuator limits and attaching mesh/collision geometry")
     problems = check_missing_actuator_limits(robot)
     if problems:
         raise PipelineError(
@@ -211,12 +248,15 @@ def generate_ros_package(
 
     attach_mesh_references(robot, mesh_files)
     attach_collision_proxies(robot, use_bounding_box_collision)
+
+    _report("Generating URDF/Xacro")
     urdf_xacro = generate_urdf_xacro(robot)
 
     fragments: List[str] = []
     extra_files: Dict[str, str] = {}
 
     if include_ros2_control:
+        _report("Generating ros2_control configuration")
         from .generators.ros2_control import (
             generate_control_launch,
             generate_controllers_yaml,
@@ -228,6 +268,7 @@ def generate_ros_package(
         extra_files["launch/control.launch.py"] = generate_control_launch(robot)
 
     if include_gazebo:
+        _report("Generating Gazebo Sim configuration")
         from .generators.gazebo import generate_gazebo_xml, generate_spawn_launch, generate_world_sdf
 
         fragments.append(generate_gazebo_xml(robot))
@@ -235,12 +276,14 @@ def generate_ros_package(
         extra_files["launch/gazebo.launch.py"] = generate_spawn_launch(robot)
 
         if robot.sensors:
+            _report("Generating sensor configuration")
             from .generators.sensors import generate_ros_gz_bridge_yaml, generate_sensor_gazebo_xml
 
             fragments.append(generate_sensor_gazebo_xml(robot))
             extra_files["config/ros_gz_bridge.yaml"] = generate_ros_gz_bridge_yaml(robot)
 
     if include_moveit:
+        _report("Generating MoveIt 2 configuration")
         from .generators.moveit import (
             detect_moveit_suitability,
             generate_joint_limits_yaml,
@@ -274,6 +317,7 @@ def generate_ros_package(
         )
 
     if include_nav2:
+        _report("Generating Nav2 configuration")
         from .generators.nav2 import (
             detect_nav2_suitability,
             generate_map_yaml_stub,
@@ -291,6 +335,7 @@ def generate_ros_package(
     if fragments:
         urdf_xacro = splice_xml_fragments(urdf_xacro, fragments)
 
+    _report("Writing ROS 2 package to disk")
     # mesh_files here is keyed by link name (export_link_meshes' contract);
     # generate_package wants it keyed by the mesh's relative filename inside
     # the package (its own, independent contract) -- re-key at this boundary

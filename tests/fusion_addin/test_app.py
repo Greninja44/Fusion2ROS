@@ -528,3 +528,75 @@ def test_run_pipeline_default_matches_pre_change_behavior(tmp_path):
     assert _package_file_bytes(package_default) == _package_file_bytes(package_explicit)
 
 
+# ---------------------------------------------------------------------------
+# progress_callback
+# ---------------------------------------------------------------------------
+
+
+def test_progress_callback_reports_minimal_stages_for_urdf_only(tmp_path):
+    robot = make_simple_robot(with_limits=True)
+    calls = []
+
+    generate_ros_package(robot, {}, tmp_path, progress_callback=lambda *args: calls.append(args))
+
+    # 3 fixed stages when no include_* flag is set: check+mesh, URDF, write.
+    assert len(calls) == 3
+    for i, (description, step, total) in enumerate(calls, start=1):
+        assert isinstance(description, str) and description
+        assert step == i
+        assert total == 3
+
+
+def test_progress_callback_total_grows_with_include_flags(tmp_path):
+    robot = make_simple_robot(with_limits=True)
+    robot.actuators.append(Actuator(name="joint1_motor", type="electric_motor", joint="joint1", interface="position"))
+    calls = []
+
+    generate_ros_package(
+        robot,
+        {},
+        tmp_path,
+        include_ros2_control=True,
+        include_moveit=True,
+        progress_callback=lambda *args: calls.append(args),
+    )
+
+    # 3 fixed stages + ros2_control + moveit = 5, and every call must agree
+    # on the same total (it's fixed for the whole call, computed up front).
+    assert len(calls) == 5
+    totals = {total for _, _, total in calls}
+    assert totals == {5}
+    steps = [step for _, step, _ in calls]
+    assert steps == [1, 2, 3, 4, 5]
+
+
+def test_progress_callback_includes_sensor_stage_only_when_sensors_present(tmp_path):
+    from robot_model import Sensor
+
+    robot = make_simple_robot(with_limits=True)
+    robot.sensors.append(Sensor(name="cam1", type="camera", parent_link="arm"))
+    calls = []
+
+    generate_ros_package(robot, {}, tmp_path, include_gazebo=True, progress_callback=lambda *args: calls.append(args))
+
+    # 3 fixed stages + gazebo + sensors = 5.
+    assert len(calls) == 5
+    descriptions = [d for d, _, _ in calls]
+    assert any("sensor" in d.lower() for d in descriptions)
+
+
+def test_progress_callback_not_called_past_the_failure_point(tmp_path):
+    # A PipelineError (missing actuator limits) is raised inside the very
+    # first stage -- the callback sees that one stage announced (it reports
+    # "starting", not "succeeded") and no more; later stages (URDF
+    # generation, write-to-disk) must never be reported since they never run.
+    robot = make_simple_robot(with_limits=False)
+    calls = []
+
+    with pytest.raises(PipelineError):
+        generate_ros_package(robot, {}, tmp_path, progress_callback=lambda *args: calls.append(args))
+
+    assert len(calls) == 1
+    assert calls[0][1:] == (1, 3)
+
+
