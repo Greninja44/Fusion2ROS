@@ -50,6 +50,9 @@ from typing import Optional
 
 DEFAULT_DISTRO = "Ubuntu-26.04"
 DEFAULT_ROS_SETUP = "/opt/ros/lyrical/setup.bash"
+# Matches docs/ARCHITECTURE.md's "Existing ROS workspace" (~/ros2_ws, already
+# used as this project's real build/launch target during development).
+DEFAULT_WSL_ROS_WS_SRC = "~/ros2_ws/src"
 
 
 @dataclass
@@ -231,3 +234,70 @@ def build_package_in_wsl(
         f"colcon build --packages-select {shlex.quote(name)}"
     )
     return run_in_wsl(build_command, distro=distro, timeout=timeout)
+
+
+def launch_ros2_in_wsl(
+    package_name: str,
+    launch_file: str,
+    wsl_ros_ws_src: str,
+    distro: str = DEFAULT_DISTRO,
+    ros_setup: str = DEFAULT_ROS_SETUP,
+    settle_seconds: float = 2.0,
+    timeout: float = 30.0,
+) -> WslResult:
+    """Run `ros2 launch <package_name> <launch_file>` inside WSL, after
+    sourcing both the base ROS 2 install (`ros_setup`) and the target colcon
+    workspace's own `install/setup.bash` (the one `build_package_in_wsl`
+    just built) -- needed because `ros2 launch` can only find a package's
+    launch files once its own workspace overlay is sourced, not just the
+    base ROS 2 distro. `wsl_ros_ws_src` uses the same "workspace root is
+    this path's parent, unless it's already the root" convention as
+    `build_package_in_wsl`.
+
+    A GUI launch (e.g. `display.launch.py`, which starts RViz2) blocks until
+    the user closes the window, so this deliberately does NOT wait for the
+    launched process to exit -- it starts it detached in the background
+    (`nohup ... & disown`) and, after `settle_seconds`, checks only whether
+    the backgrounded process is *still running* (as a quick, best-effort
+    "did it crash on startup" signal -- e.g. package not found, launch file
+    missing, a node erroring out immediately) before returning. A True
+    `WslResult.success` here means "the launch command started and didn't
+    immediately die", NOT "RViz successfully opened a visible window" --
+    this Windows-side process has no way to confirm a GUI actually rendered
+    (see docs/ARCHITECTURE.md's own note on WSLg screenshot limitations,
+    hit in a different context during this project). Captured
+    stdout/stderr, on failure, is whatever the process printed in that
+    window, redirected to a temp log file and cat'd back.
+
+    THIS HAS NOT BEEN RUN END TO END -- same "unverified, best-effort draft"
+    status as build_package_in_wsl (see this module's docstring), plus one
+    extra untested assumption of its own: that `$!` (the backgrounded PID)
+    survives correctly through this exact `bash -lc "... & disown; ..."`
+    chain when invoked non-interactively via `wsl.exe`. Treat the
+    settle-and-poll result as a hint, not a guarantee, until checked live.
+    """
+    ws_src = wsl_ros_ws_src.rstrip("/")
+    ws_root = posixpath.dirname(ws_src) if posixpath.basename(ws_src) == "src" else ws_src
+    install_setup = posixpath.join(ws_root, "install", "setup.bash")
+    # ROS 2 package names are conventionally simple identifiers
+    # ([a-z][a-z0-9_]*, per REP 144); no extra sanitizing attempted beyond
+    # that convention for this log filename.
+    log_file = f"/tmp/fusion2ros_launch_{package_name}.log"
+
+    command = (
+        f"source {shlex.quote(ros_setup)} && "
+        f"source {shlex.quote(install_setup)} && "
+        f"nohup ros2 launch {shlex.quote(package_name)} {shlex.quote(launch_file)} "
+        f"> {shlex.quote(log_file)} 2>&1 & "
+        f"disown; "
+        f"pid=$!; "
+        f"sleep {shlex.quote(str(settle_seconds))}; "
+        f"if kill -0 \"$pid\" 2>/dev/null; then "
+        f"echo 'Fusion2ROS: launch started (pid '\"$pid\"'), still running after {settle_seconds}s.'; "
+        f"else "
+        f"echo 'Fusion2ROS: launch process exited within {settle_seconds}s -- likely failed.' >&2; "
+        f"cat {shlex.quote(log_file)} >&2; "
+        f"exit 1; "
+        f"fi"
+    )
+    return run_in_wsl(command, distro=distro, timeout=timeout)

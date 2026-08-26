@@ -295,19 +295,35 @@ class FusionDesignReaderAdapter(FusionDesignReader):
     """Real FusionDesignReader backed by a live `adsk.fusion.Design`.
 
     Confirmed via Design_rootComponent.htm: `Design.rootComponent` returns
-    the root Component. Confirmed via Component_allJoints.htm:
-    `Component.allJoints` returns every joint in the component and its
-    subcomponents, flattened, which is "primarily useful when used from the
-    root component because Fusion flattens the assembly structure". We rely
-    on the analogous `allOccurrences` for occurrences -- its exact doc page
-    was not directly fetched in this session (search results referenced it,
-    e.g. `rootComp.allOccurrences`, but no dedicated doc page was opened) --
-    flagged here as a minor remaining gap, though `allOccurrences` is a
-    very commonly used, stable part of the API in every third-party sample
-    seen during research.
+    the root Component. Confirmed via Component.htm: `Component.allJoints`
+    ("Returns all joints in this component and any sub components") and
+    `Component.allOccurrences` ("Returns all of the occurrences in the
+    assembly regardless of their level within the assembly structure") are
+    both real, documented properties of `Component` -- not just of the
+    design's root component specifically, which is what makes the optional
+    `root_component` scoping parameter below valid: any Component (e.g. one
+    reached via a selected Occurrence's `.component`) supports the same two
+    properties, not only `design.rootComponent`.
     """
 
-    def __init__(self, design=None):  # design: Optional[adsk.fusion.Design]
+    def __init__(self, design=None, root_component=None):
+        # design: Optional[adsk.fusion.Design]
+        # root_component: Optional[adsk.fusion.Component] -- ADDITIVE, optional
+        # scoping parameter (added for the Fusion UI's root/occurrence
+        # selection input, ui/command.py). When given, extraction is scoped to
+        # this component's own occurrences/joints (and its subcomponents) via
+        # `Component.allOccurrences`/`Component.allJoints`, instead of the
+        # whole design's `rootComponent`. Confirmed real, documented
+        # properties (Component.htm, fetched from help.autodesk.com during
+        # this change): allOccurrences -- "Returns all of the occurrences in
+        # the assembly regardless of their level within the assembly
+        # structure"; allJoints -- "Returns all joints in this component and
+        # any sub components." The intended caller passes an
+        # `Occurrence.component` (Occurrence_component.htm: "The component
+        # this occurrence references") obtained from a
+        # SelectionCommandInput restricted to the "Occurrences" selection
+        # filter. When None (default), behavior is unchanged from before this
+        # parameter existed: the whole design's root component is used.
         _require_adsk()
         if design is None:
             app = adsk.core.Application.get()
@@ -315,11 +331,10 @@ class FusionDesignReaderAdapter(FusionDesignReader):
             if design is None:
                 raise RuntimeError("No active Fusion Design (activeProduct is not a Design)")
         self._design = design
+        self._root = root_component if root_component is not None else design.rootComponent
 
     def list_occurrences(self) -> List[FusionOccurrence]:
-        root = self._design.rootComponent
-        return [_occurrence_to_fusion_occurrence(occ) for occ in root.allOccurrences]
+        return [_occurrence_to_fusion_occurrence(occ) for occ in self._root.allOccurrences]
 
     def list_joints(self) -> List[FusionJointInfo]:
-        root = self._design.rootComponent
-        return [_joint_to_fusion_joint_info(j) for j in root.allJoints]
+        return [_joint_to_fusion_joint_info(j) for j in self._root.allJoints]
