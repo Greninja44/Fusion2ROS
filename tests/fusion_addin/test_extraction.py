@@ -459,3 +459,46 @@ def test_rpy_matrix_round_trip():
 def test_matrix_from_basis_vectors_matches_rpy_to_matrix_for_identity():
     identity = matrix_from_basis_vectors((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
     assert identity == rpy_to_matrix((0.0, 0.0, 0.0))
+
+
+# ---------------------------------------------------------------------------
+# bounding_box -> Link.metadata["bounding_box_size"]
+# ---------------------------------------------------------------------------
+
+
+def test_bounding_box_converted_to_bounding_box_size_in_meters():
+    # 10cm x 20cm x 5cm box (min at origin) -> 0.1 x 0.2 x 0.05 m, easy to
+    # hand-verify: CM_TO_M is a straight /100 per axis on (max - min).
+    occ = FusionOccurrence(
+        name="boxy:1",
+        pose=FusionPose(),
+        inertia=FusionInertia(mass=1.0, center_of_mass=(0, 0, 0), ixx=1, iyy=1, izz=1, ixy=0, ixz=0, iyz=0),
+        bounding_box=((0.0, 0.0, 0.0), (10.0, 20.0, 5.0)),
+    )
+    reader = FakeFusionDesignReader([occ], [])
+    robot = build_robot_model(reader, "bbox_robot")
+    link = robot.link("boxy_1")
+    assert link.metadata["bounding_box_size"] == pytest.approx((0.1, 0.2, 0.05))
+
+
+def test_bounding_box_offset_min_corner_still_gives_correct_extents():
+    # min/max not at the origin -- only the DIFFERENCE (extents) matters.
+    occ = FusionOccurrence(
+        name="boxy2:1",
+        pose=FusionPose(),
+        inertia=FusionInertia(mass=1.0, center_of_mass=(0, 0, 0), ixx=1, iyy=1, izz=1, ixy=0, ixz=0, iyz=0),
+        bounding_box=((3.0, -2.0, 1.0), (13.0, 18.0, 6.0)),
+    )
+    reader = FakeFusionDesignReader([occ], [])
+    robot = build_robot_model(reader, "bbox_robot2")
+    link = robot.link("boxy2_1")
+    assert link.metadata["bounding_box_size"] == pytest.approx((0.1, 0.2, 0.05))
+
+
+def test_missing_bounding_box_leaves_metadata_key_absent():
+    # Default bounding_box=None (the fixture reader never sets it) must NOT
+    # produce a "bounding_box_size" key at all -- absent, not None, so
+    # downstream code can use plain .get()/"in" checks.
+    robot = build_robot_model(make_three_link_arm_reader(), "test_arm")
+    base = robot.link("base_link_1")
+    assert "bounding_box_size" not in base.metadata

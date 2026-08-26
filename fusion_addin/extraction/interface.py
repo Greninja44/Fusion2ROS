@@ -110,12 +110,28 @@ class FusionOccurrence:
                   carried through into Link.metadata so a later mesh-export
                   step (fusion_addin/generators/mesh.py, out of scope here)
                   knows which Fusion bodies correspond to which link.
+    bounding_box : optional (min_corner, max_corner) pair, each an (x, y, z)
+                  Vec3 in centimeters, expressed in the same flattened
+                  assembly (world) context as `pose` -- i.e. what
+                  `Occurrence.boundingBox` (an `adsk.core.BoundingBox3D`)
+                  gives via its `.minPoint`/`.maxPoint` (each an
+                  `adsk.core.Point3D` with `.x`/`.y`/`.z`), all in Fusion's
+                  native centimeters per the module docstring's length-unit
+                  note. World-AXIS-ALIGNED, not oriented to the occurrence's
+                  own local frame -- converter.py uses this only to derive a
+                  simplified world-aligned box size for a collision proxy,
+                  never to place or orient anything. Defaults to None so
+                  existing fakes/tests that don't set it keep working
+                  unmodified; None also covers occurrences with no visible/
+                  tessellatable geometry, where Fusion may have nothing
+                  meaningful to report.
     """
 
     name: str
     pose: FusionPose
     inertia: FusionInertia
     body_names: List[str] = field(default_factory=list)
+    bounding_box: Optional[Tuple[Vec3, Vec3]] = None
 
 
 @dataclass(frozen=True)

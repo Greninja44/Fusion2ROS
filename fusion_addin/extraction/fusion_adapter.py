@@ -138,6 +138,32 @@ def _body_names(occurrence) -> List[str]:  # occurrence: adsk.fusion.Occurrence
     return names
 
 
+def _occurrence_bounding_box(occurrence):  # occurrence: adsk.fusion.Occurrence
+    """Confirmed via Occurrence.htm / BoundingBox3D.htm: `Occurrence.boundingBox`
+    returns an `adsk.core.BoundingBox3D` with `.minPoint`/`.maxPoint`, each an
+    `adsk.core.Point3D` exposing `.x`/`.y`/`.z` in Fusion's native centimeters
+    (same internal-units rule as everywhere else in this file), expressed in
+    the same flattened assembly/world context as `occurrence.transform2`. This
+    is a long-standing, stable, widely-used part of the API (every third-party
+    bounding-box sample found during research uses exactly this shape) -- one
+    of the more confidently-verifiable calls in this file, even though it has
+    not been exercised against a live Fusion process from this sandbox.
+
+    Returns None if Fusion reports no bounding box for this occurrence (e.g.
+    an empty/reference-only occurrence with no visible geometry) -- some
+    third-party reports describe `boundingBox` as potentially None in that
+    case, so we defend against it rather than assume it is always populated.
+    """
+    bbox = occurrence.boundingBox
+    if bbox is None:
+        return None
+    min_pt, max_pt = bbox.minPoint, bbox.maxPoint
+    return (
+        (min_pt.x, min_pt.y, min_pt.z),
+        (max_pt.x, max_pt.y, max_pt.z),
+    )
+
+
 def _occurrence_to_fusion_occurrence(occurrence) -> FusionOccurrence:  # occurrence: adsk.fusion.Occurrence
     pose = _matrix3d_to_pose(occurrence.transform2)
     props = occurrence.getPhysicalProperties()
@@ -147,6 +173,7 @@ def _occurrence_to_fusion_occurrence(occurrence) -> FusionOccurrence:  # occurre
         pose=pose,
         inertia=inertia,
         body_names=_body_names(occurrence),
+        bounding_box=_occurrence_bounding_box(occurrence),
     )
 
 
