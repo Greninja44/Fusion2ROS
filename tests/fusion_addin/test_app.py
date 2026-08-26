@@ -9,6 +9,7 @@ from fusion_addin.app import (
     PipelineError,
     attach_mesh_references,
     check_missing_actuator_limits,
+    format_robot_summary,
     generate_ros_package,
     run_pipeline,
 )
@@ -47,6 +48,33 @@ def test_check_missing_actuator_limits_reports_joint():
     assert "joint1" in problems[0]
     assert "velocity_limit" in problems[0]
     assert "effort_limit" in problems[0]
+
+
+def test_format_robot_summary_lists_links_and_joints():
+    robot = make_simple_robot(with_limits=True)
+    summary = format_robot_summary(robot)
+
+    assert "Links (2):" in summary
+    assert "- base_link" in summary
+    assert "(root)" in summary
+    assert "- arm" in summary
+    assert "(parent: base_link)" in summary
+
+    assert "Joints (1):" in summary
+    assert "- joint1" in summary
+    assert "[revolute]" in summary
+    assert "base_link -> arm" in summary
+
+
+def test_format_robot_summary_no_joints():
+    base = Link(name="base_link", inertial=Inertial(mass=1.0, ixx=0.01, iyy=0.01, izz=0.01))
+    robot = Robot(name="lone_link_robot", links=[base], joints=[])
+
+    summary = format_robot_summary(robot)
+
+    assert "Links (1):" in summary
+    assert "Joints (0):" in summary
+    assert "(none)" in summary
 
 
 def test_attach_mesh_references(tmp_path):

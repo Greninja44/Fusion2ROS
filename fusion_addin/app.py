@@ -107,6 +107,33 @@ def splice_xml_fragments(urdf_xacro: str, fragments: List[str]) -> str:
     return text[: -len("</robot>")] + "".join(pieces) + "</robot>\n"
 
 
+def format_robot_summary(robot: Robot) -> str:
+    """Human-readable readback of a built Robot's detected links and joints.
+
+    Backs the Fusion UI's read-only "Detected Links/Joints" text box
+    (ui/command.py's GenerateCommandCreatedHandler / InputChangedEventHandler)
+    -- the mockup's "Detected Links [check] base_link [check] link1..."
+    checklist, simplified here to a plain read-only listing rather than a
+    per-item checkbox tree (Fusion's TextBoxCommandInput has no such control;
+    building one would need a BrowserCommandInput/custom HTML palette, out of
+    scope for this pass). Pure formatting of an already-built Robot, no adsk
+    dependency -- unit tested directly with a hand-built Robot fixture.
+    """
+    lines: List[str] = [f"Links ({len(robot.links)}):"]
+    for link in robot.links:
+        suffix = f"  (parent: {link.parent})" if link.parent else "  (root)"
+        lines.append(f"  - {link.name}{suffix}")
+
+    lines.append("")
+    lines.append(f"Joints ({len(robot.joints)}):")
+    if not robot.joints:
+        lines.append("  (none)")
+    for joint in robot.joints:
+        lines.append(f"  - {joint.name}  [{joint.type.value}]  {joint.parent} -> {joint.child}")
+
+    return "\n".join(lines)
+
+
 def generate_ros_package(
     robot: Robot,
     mesh_files: Dict[str, Path],
