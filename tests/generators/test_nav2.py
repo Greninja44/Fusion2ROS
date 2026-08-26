@@ -17,6 +17,7 @@ from robot_model import Geometry, Inertial, Joint, JointType, Link, Pose, Robot,
 
 from fusion_addin.generators.nav2 import (
     CONTROLLER_PLUGIN,
+    MECANUM_CONTROLLER_PLUGIN,
     PLANNER_PLUGIN,
     compute_footprint_radius,
     detect_nav2_suitability,
@@ -119,6 +120,79 @@ def build_sample_rover(drivetrain_overrides: dict = None) -> Robot:
     return robot
 
 
+# --- fixture: a small mecanum-drive rover -----------------------------------
+#
+# Hand-built for this file (not imported from test_ros2_control.py's
+# make_mecanum_robot, per this module's instructions to touch only nav2.py /
+# test_nav2.py) but mirrors that fixture's geometry pattern: a boxy base_link
+# and four CONTINUOUS-jointed cylinder wheels, all box/cylinder primitives so
+# footprint-radius computation is exercised without mesh geometry.
+
+MECANUM_WHEEL_RADIUS = 0.08
+_HALF_WHEELBASE = 0.2
+_HALF_TRACK_WIDTH = 0.15
+
+
+def build_mecanum_rover(drivetrain_overrides: dict = None) -> Robot:
+    base_link = Link(
+        name="base_link",
+        visual_geometry=Geometry(kind="box", size=(0.5, 0.4, 0.15)),
+        collision_geometry=Geometry(kind="box", size=(0.5, 0.4, 0.15)),
+        inertial=Inertial(mass=8.0, ixx=0.1, iyy=0.12, izz=0.15),
+    )
+
+    def _wheel_link(name: str) -> Link:
+        return Link(
+            name=name,
+            parent="base_link",
+            visual_geometry=Geometry(kind="cylinder", radius=MECANUM_WHEEL_RADIUS, length=0.04),
+            collision_geometry=Geometry(kind="cylinder", radius=MECANUM_WHEEL_RADIUS, length=0.04),
+            inertial=Inertial(mass=0.4, ixx=0.0006, iyy=0.0006, izz=0.001),
+        )
+
+    def _wheel_joint(name: str, child: str, x: float, y: float) -> Joint:
+        return Joint(
+            name=name,
+            type=JointType.CONTINUOUS,
+            parent="base_link",
+            child=child,
+            origin=Pose(xyz=(x, y, -0.05)),
+            axis=(0.0, 1.0, 0.0),
+        )
+
+    front_left = _wheel_link("front_left_wheel")
+    front_right = _wheel_link("front_right_wheel")
+    back_left = _wheel_link("back_left_wheel")
+    back_right = _wheel_link("back_right_wheel")
+
+    fl_joint = _wheel_joint("front_left_wheel_joint", "front_left_wheel", _HALF_WHEELBASE, _HALF_TRACK_WIDTH)
+    fr_joint = _wheel_joint("front_right_wheel_joint", "front_right_wheel", _HALF_WHEELBASE, -_HALF_TRACK_WIDTH)
+    bl_joint = _wheel_joint("back_left_wheel_joint", "back_left_wheel", -_HALF_WHEELBASE, _HALF_TRACK_WIDTH)
+    br_joint = _wheel_joint("back_right_wheel_joint", "back_right_wheel", -_HALF_WHEELBASE, -_HALF_TRACK_WIDTH)
+
+    drivetrain = {
+        "type": "mecanum_drive",
+        "front_left_wheel_joint": "front_left_wheel_joint",
+        "front_right_wheel_joint": "front_right_wheel_joint",
+        "back_left_wheel_joint": "back_left_wheel_joint",
+        "back_right_wheel_joint": "back_right_wheel_joint",
+        "wheel_radius": MECANUM_WHEEL_RADIUS,
+        # lx + ly: half wheelbase + half track width.
+        "sum_of_robot_center_projection_on_x_y_axis": _HALF_WHEELBASE + _HALF_TRACK_WIDTH,
+    }
+    if drivetrain_overrides is not None:
+        drivetrain.update(drivetrain_overrides)
+
+    robot = Robot(
+        name="mecanum_rover",
+        links=[base_link, front_left, front_right, back_left, back_right],
+        joints=[fl_joint, fr_joint, bl_joint, br_joint],
+        metadata={"drivetrain": drivetrain},
+    )
+    robot.validate()
+    return robot
+
+
 # --- detect_nav2_suitability -------------------------------------------------
 
 
@@ -187,6 +261,53 @@ def test_wheel_joint_of_wrong_type_is_reported():
     problems = detect_nav2_suitability(robot)
     assert problems
     assert any("caster_joint" in p for p in problems)
+
+
+# --- detect_nav2_suitability: mecanum drive ---------------------------------
+
+
+def test_suitable_mecanum_rover_has_no_problems():
+    robot = build_mecanum_rover()
+    assert detect_nav2_suitability(robot) == []
+
+
+def test_mecanum_missing_required_field_is_reported_specifically():
+    robot = build_mecanum_rover()
+    del robot.metadata["drivetrain"]["sum_of_robot_center_projection_on_x_y_axis"]
+    problems = detect_nav2_suitability(robot)
+    assert problems
+    assert any("sum_of_robot_center_projection_on_x_y_axis" in p for p in problems)
+    # Must not also complain about fields that *are* present.
+    assert not any("wheel_radius" in p for p in problems)
+    assert not any("front_left_wheel_joint" in p for p in problems)
+
+
+def test_mecanum_missing_wheel_radius_is_reported():
+    robot = build_mecanum_rover()
+    del robot.metadata["drivetrain"]["wheel_radius"]
+    problems = detect_nav2_suitability(robot)
+    assert problems
+    assert any("wheel_radius" in p for p in problems)
+
+
+def test_mecanum_wheel_joint_not_in_robot_joints_is_reported():
+    robot = build_mecanum_rover()
+    robot.metadata["drivetrain"]["back_right_wheel_joint"] = "does_not_exist"
+    problems = detect_nav2_suitability(robot)
+    assert problems
+    assert any("does_not_exist" in p for p in problems)
+
+
+def test_unrecognized_drivetrain_type_is_unsuitable_not_silently_ignored():
+    # Regression guard: an unrecognized "type" must be reported as a
+    # suitability problem, never silently treated as "no drivetrain" or as
+    # one of the two known shapes (mirrors ros2_control.py's own regression
+    # test for the same historical bug).
+    robot = build_mecanum_rover()
+    robot.metadata["drivetrain"]["type"] = "omni_drive"
+    problems = detect_nav2_suitability(robot)
+    assert problems
+    assert any("omni_drive" in p for p in problems)
 
 
 # --- generators refuse unsuitable robots -------------------------------------
@@ -289,6 +410,94 @@ def test_footprint_radius_raises_when_only_mesh_geometry_present():
         compute_footprint_radius(robot)
     with pytest.raises(ValueError):
         generate_nav2_params_yaml(robot)
+
+
+# --- compute_footprint_radius: mecanum drive (drivetrain-agnostic check) ----
+
+
+def test_footprint_radius_works_for_four_wheel_mecanum_fixture():
+    # compute_footprint_radius operates purely on link geometry/kinematic
+    # tree, with no drivetrain-type awareness at all -- confirm it produces
+    # the same kind of sane result for a 4-mecanum-wheel robot as it does
+    # for the differential-drive fixture above, with zero changes needed to
+    # the function itself.
+    robot = build_mecanum_rover()
+    radius, skipped = compute_footprint_radius(robot)
+    assert skipped == []
+    # base_link is a (0.5, 0.4, 0.15) box centered on the root -> half-diagonal
+    # sqrt(0.25^2 + 0.2^2 + 0.075^2) ~= 0.329 m. Each wheel sits at
+    # (+-0.2, +-0.15, -0.05) -- distance sqrt(0.2^2 + 0.15^2 + 0.05^2) ~=
+    # 0.255 m from the root -- plus its own cylinder bounding radius
+    # sqrt(0.08^2 + 0.02^2) ~= 0.0825 m, for ~0.337 m: slightly *more* than
+    # base_link's half-diagonal, so (unlike the differential-drive fixture
+    # above, where the base dominates) a wheel sets the radius here. Both
+    # are exercised by this suite, and either way the function needs zero
+    # drivetrain-specific logic to get it right.
+    import math
+
+    expected = math.sqrt(0.2 ** 2 + 0.15 ** 2 + 0.05 ** 2) + math.sqrt(0.08 ** 2 + 0.02 ** 2)
+    assert radius == pytest.approx(expected, rel=1e-6)
+
+
+# --- generate_nav2_params_yaml: mecanum drive --------------------------------
+
+
+def test_mecanum_params_yaml_uses_mppi_controller_with_omni_motion_model():
+    robot = build_mecanum_rover()
+    text = generate_nav2_params_yaml(robot)
+    assert MECANUM_CONTROLLER_PLUGIN in text
+    assert CONTROLLER_PLUGIN not in text  # RPP must not appear for a mecanum robot
+    assert 'motion_model: "Omni"' in text
+    assert PLANNER_PLUGIN in text  # planner choice is drivetrain-agnostic
+
+
+@requires_yaml
+def test_mecanum_params_yaml_is_parseable_and_structured_correctly():
+    robot = build_mecanum_rover()
+    text = generate_nav2_params_yaml(robot)
+    doc = yaml.safe_load(text)
+
+    assert set(
+        [
+            "amcl",
+            "controller_server",
+            "planner_server",
+            "bt_navigator",
+            "behavior_server",
+            "waypoint_follower",
+            "map_server",
+            "local_costmap",
+            "global_costmap",
+        ]
+    ) <= set(doc.keys())
+
+    follow_path = doc["controller_server"]["ros__parameters"]["FollowPath"]
+    assert follow_path["plugin"] == MECANUM_CONTROLLER_PLUGIN
+    assert follow_path["motion_model"] == "Omni"
+    assert "vy_max" in follow_path  # holonomic-only parameter, confirmed real (see module docstring)
+    assert "TwirlingCritic" in follow_path["critics"]
+
+    assert doc["planner_server"]["ros__parameters"]["GridBased"]["plugin"] == PLANNER_PLUGIN
+    assert doc["amcl"]["ros__parameters"]["robot_model_type"] == "nav2_amcl::OmniMotionModel"
+
+    local_radius = doc["local_costmap"]["local_costmap"]["ros__parameters"]["robot_radius"]
+    global_radius = doc["global_costmap"]["global_costmap"]["ros__parameters"]["robot_radius"]
+    expected_radius, _ = compute_footprint_radius(robot)
+    assert local_radius == pytest.approx(expected_radius, abs=1e-4)
+    assert global_radius == pytest.approx(expected_radius, abs=1e-4)
+
+
+def test_mecanum_bringup_launch_and_map_stub_generate_cleanly():
+    # generate_nav2_bringup_launch / generate_map_yaml_stub are
+    # drivetrain-agnostic -- confirm they simply work for a mecanum robot
+    # too, with no drivetrain-specific content expected in either.
+    robot = build_mecanum_rover()
+    launch_text = generate_nav2_bringup_launch(robot)
+    compile(launch_text, "<string>", "exec")
+    assert "bringup_launch.py" in launch_text
+
+    map_text = generate_map_yaml_stub(robot)
+    assert "STUB" in map_text or "PLACEHOLDER" in map_text.upper()
 
 
 # --- generate_nav2_params_yaml ----------------------------------------------

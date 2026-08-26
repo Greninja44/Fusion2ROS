@@ -6,7 +6,8 @@ robot, and `robot_model.Robot` is a general kinematic tree with no built-in
 "this is a mobile base" concept. This module therefore:
 
 1. Detects whether a `Robot` is even suitable for Nav2 (`detect_nav2_suitability`)
-   using a documented convention on `Robot.metadata["drivetrain"]`:
+   using a documented convention on `Robot.metadata["drivetrain"]`, which
+   supports two shapes:
 
        robot.metadata["drivetrain"] = {
            "type": "differential_drive",
@@ -16,10 +17,24 @@ robot, and `robot_model.Robot` is a general kinematic tree with no built-in
            "wheel_radius": <float, meters>,
        }
 
+       robot.metadata["drivetrain"] = {
+           "type": "mecanum_drive",
+           "front_left_wheel_joint": "<joint name, CONTINUOUS or REVOLUTE>",
+           "front_right_wheel_joint": "<joint name>",
+           "back_left_wheel_joint": "<joint name>",
+           "back_right_wheel_joint": "<joint name>",
+           "wheel_radius": <float, meters>,
+           "sum_of_robot_center_projection_on_x_y_axis": <float, meters>,
+       }
+
    This is the SAME convention `fusion_addin/generators/ros2_control.py` uses
-   to detect a `diff_drive_controller` -- both generators key off the exact
-   same `Robot.metadata["drivetrain"]` shape so a single extraction step can
-   feed both.
+   to detect a `diff_drive_controller`/`mecanum_drive_controller` -- both
+   generators key off the exact same `Robot.metadata["drivetrain"]` shape so
+   a single extraction step can feed both. As in `ros2_control.py`, an
+   unrecognized `"type"` value (anything other than `"differential_drive"` or
+   `"mecanum_drive"`) is reported as a suitability problem naming the bad
+   value -- it is never silently treated as "no drivetrain" or as one of the
+   two known shapes.
 
 2. Only if suitable, generates:
    - `generate_nav2_params_yaml`: a Nav2 stack parameter file.
@@ -37,7 +52,8 @@ dependency-free.
 
 Plugin choices (see module-level constants below for the exact strings used):
 
-- Controller (`FollowPath`): `nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController`,
+- Controller (`FollowPath`) for a **differential-drive** robot:
+  `nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController`,
   not `dwb_core::DWBLocalPlanner`. Nav2's own docs recommend Regulated Pure
   Pursuit specifically for differential-drive and Ackermann bases (exactly
   what `detect_nav2_suitability` requires here), and it needs far fewer
@@ -46,10 +62,40 @@ Plugin choices (see module-level constants below for the exact strings used):
   against https://github.com/ros-navigation/navigation2 at the time this was
   written) and is a perfectly reasonable alternative -- it just isn't the
   choice made here.
-- Planner (`GridBased`): `nav2_navfn_planner::NavfnPlanner` -- the
-  long-standing default grid planner, unchanged across recent Nav2 releases
-  (still the shipped default in nav2_bringup's params.yaml as of this
-  writing), so there is nothing to second-guess here.
+- Controller (`FollowPath`) for a **mecanum-drive** robot:
+  `nav2_mppi_controller::MPPIController` with `motion_model: "Omni"`, NOT
+  Regulated Pure Pursuit. RegulatedPurePursuitController is fundamentally a
+  non-holonomic controller -- Nav2's own MPPI README (see
+  https://github.com/ros-navigation/navigation2, nav2_mppi_controller/README.md,
+  as re-published at
+  https://api.nav2.org/nav2-jazzy/html/md_nav2_mppi_controller_README.html)
+  documents `motion_model` as one of `[DiffDrive, Omni, Ackermann]`, with
+  `vy_max`/`vy_std` parameters explicitly described as applying "if
+  holonomic" -- i.e. only meaningful once `motion_model: Omni` is selected.
+  Confirmed for real against this machine's installed
+  `nav2_mppi_controller` 1.5.1 package (downloaded via `apt-get download`,
+  not actually apt-installed, since that needs root this sandbox doesn't
+  have -- see the generator's test-time verification notes): its pluginlib
+  export `/opt/ros/lyrical/share/nav2_mppi_controller/mppic.xml` registers
+  exactly `nav2_mppi_controller::MPPIController` (base class
+  `nav2_core::Controller`), and its
+  `/opt/ros/lyrical/share/nav2_mppi_controller/motion_models.xml` documents
+  `mppi::OmniMotionModel` as "Omnidirectional motion model. Holonomic --
+  supports independent vx, vy, and wz control", versus
+  `mppi::DiffDriveMotionModel` as "Non-holonomic". The generated config also
+  adds `TwirlingCritic` to the critics list for the mecanum case specifically
+  because that same package's `critics.xml` documents it as "mppi critic for
+  preventing twirling behavior when using omnidirectional models" -- a
+  failure mode that only exists for a holonomic base free to rotate
+  independently of its heading of travel.
+- Planner (`GridBased`): `nav2_navfn_planner::NavfnPlanner` for BOTH
+  drivetrain types -- the long-standing default grid planner, unchanged
+  across recent Nav2 releases (still the shipped default in nav2_bringup's
+  params.yaml as of this writing). NavFn plans a path on the 2D costmap
+  without reasoning about the follower's kinematics, so nothing about
+  holonomic vs. non-holonomic motion changes which planner is the right
+  choice here -- that distinction only matters to the *controller* that
+  follows the path.
 
 Footprint: modeled as a single circle (`robot_radius`), sized to the largest
 bounding sphere among the robot's link geometries. Only `box`/`cylinder`/
@@ -77,9 +123,41 @@ _IDENTITY_ROTATION: Mat3 = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 # --- plugin choices (see module docstring for the "why") --------------------
 
 CONTROLLER_PLUGIN = "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+MECANUM_CONTROLLER_PLUGIN = "nav2_mppi_controller::MPPIController"
 PLANNER_PLUGIN = "nav2_navfn_planner::NavfnPlanner"
 
-_REQUIRED_DRIVETRAIN_TYPE = "differential_drive"
+_DIFFERENTIAL_DRIVE = "differential_drive"
+_MECANUM_DRIVE = "mecanum_drive"
+_SUPPORTED_DRIVETRAIN_TYPES = (_DIFFERENTIAL_DRIVE, _MECANUM_DRIVE)
+
+# Wheel-joint metadata keys and required numeric keys per drivetrain shape --
+# see module docstring for the full shape of each. Mirrors
+# `fusion_addin/generators/ros2_control.py`'s own `_DIFF_DRIVE_WHEEL_KEYS`/
+# `_MECANUM_WHEEL_KEYS` split.
+_DRIVETRAIN_WHEEL_FIELDS: Dict[str, Tuple[str, ...]] = {
+    _DIFFERENTIAL_DRIVE: ("left_wheel_joint", "right_wheel_joint"),
+    _MECANUM_DRIVE: (
+        "front_left_wheel_joint",
+        "front_right_wheel_joint",
+        "back_left_wheel_joint",
+        "back_right_wheel_joint",
+    ),
+}
+_DRIVETRAIN_NUMERIC_FIELDS: Dict[str, Tuple[str, ...]] = {
+    _DIFFERENTIAL_DRIVE: ("wheel_separation", "wheel_radius"),
+    _MECANUM_DRIVE: ("wheel_radius", "sum_of_robot_center_projection_on_x_y_axis"),
+}
+
+# amcl's own `robot_model_type` plugin choice per drivetrain shape --
+# confirmed for real against this machine's installed nav2_amcl 1.5.1
+# `/opt/ros/lyrical/share/nav2_amcl/plugins.xml`, which registers BOTH
+# `nav2_amcl::DifferentialMotionModel` ("This is a diff plugin.") and
+# `nav2_amcl::OmniMotionModel` ("This is a omni plugin.") -- amcl has its
+# own holonomic motion model, entirely separate from the controller's.
+_AMCL_ROBOT_MODEL_TYPE = {
+    _DIFFERENTIAL_DRIVE: "nav2_amcl::DifferentialMotionModel",
+    _MECANUM_DRIVE: "nav2_amcl::OmniMotionModel",
+}
 
 
 # --- suitability detection ---------------------------------------------------
@@ -90,12 +168,18 @@ def detect_nav2_suitability(robot: Robot) -> List[str]:
     generation. An empty list means `robot` is suitable.
 
     A robot is suitable only if `robot.metadata["drivetrain"]` declares a
-    `"differential_drive"` base (see module docstring for the exact shape),
-    with both wheel joints actually present in `robot.joints` (and of a
-    driveable type), and both `wheel_separation`/`wheel_radius` present as
-    positive numbers. This function never guesses or defaults a missing
-    field -- every problem it reports names the specific thing that is
-    missing or invalid.
+    `"differential_drive"` OR `"mecanum_drive"` base (see module docstring
+    for the exact shape of each), with every wheel joint the shape names
+    actually present in `robot.joints` (and of a driveable type), and every
+    shape-required numeric field present as a positive number. Any OTHER
+    `"type"` value is reported as a problem naming the bad value -- it is
+    NEVER silently treated as "no drivetrain" or coerced into one of the two
+    known shapes (mirrors `fusion_addin/generators/ros2_control.py`'s own
+    `_drivetrain_info`, which used to have exactly this silent-fallthrough
+    bug for an unrecognized type).
+
+    This function never guesses or defaults a missing field -- every problem
+    it reports names the specific thing that is missing or invalid.
     """
     problems: List[str] = []
 
@@ -105,9 +189,10 @@ def detect_nav2_suitability(robot: Robot) -> List[str]:
     if drivetrain is None:
         problems.append(
             "robot.metadata['drivetrain'] is not set. Nav2 generation only "
-            "supports a differential-drive mobile base declared via that key "
-            "(see fusion_addin/generators/nav2.py module docstring for the "
-            "required shape); this Robot has no drivetrain metadata at all."
+            "supports a differential-drive or mecanum-drive mobile base "
+            "declared via that key (see fusion_addin/generators/nav2.py "
+            "module docstring for the required shape); this Robot has no "
+            "drivetrain metadata at all."
         )
         return problems
 
@@ -118,16 +203,19 @@ def detect_nav2_suitability(robot: Robot) -> List[str]:
         return problems
 
     drive_type = drivetrain.get("type")
-    if drive_type != _REQUIRED_DRIVETRAIN_TYPE:
+    if drive_type not in _SUPPORTED_DRIVETRAIN_TYPES:
         problems.append(
             f"robot.metadata['drivetrain']['type'] is {drive_type!r}; Nav2 "
-            f"generation currently only supports {_REQUIRED_DRIVETRAIN_TYPE!r}."
+            f"generation currently only supports {_SUPPORTED_DRIVETRAIN_TYPES}."
         )
         return problems
 
+    wheel_fields = _DRIVETRAIN_WHEEL_FIELDS[drive_type]
+    numeric_fields = _DRIVETRAIN_NUMERIC_FIELDS[drive_type]
+
     joints_by_name: Dict[str, Joint] = {j.name: j for j in robot.joints}
 
-    for field_name in ("left_wheel_joint", "right_wheel_joint"):
+    for field_name in wheel_fields:
         joint_name = drivetrain.get(field_name)
         if not joint_name:
             problems.append(f"drivetrain[{field_name!r}] is missing or empty.")
@@ -145,7 +233,7 @@ def detect_nav2_suitability(robot: Robot) -> List[str]:
                 "CONTINUOUS or REVOLUTE."
             )
 
-    for field_name in ("wheel_separation", "wheel_radius"):
+    for field_name in numeric_fields:
         value = drivetrain.get(field_name)
         if value is None:
             problems.append(f"drivetrain[{field_name!r}] is missing.")
@@ -329,8 +417,10 @@ def _fmt_num(value) -> str:
 def generate_nav2_params_yaml(robot: Robot) -> str:
     """Render a Nav2 stack parameter file for `robot`.
 
-    Covers `amcl`, `controller_server` (FollowPath = Regulated Pure Pursuit),
-    `planner_server` (GridBased = NavfnPlanner), `bt_navigator`,
+    Covers `amcl`, `controller_server` (FollowPath = Regulated Pure Pursuit
+    for a differential-drive `robot`, or MPPI with `motion_model: "Omni"`
+    for a mecanum-drive one -- see module docstring for why), `planner_server`
+    (GridBased = NavfnPlanner, both drivetrains), `bt_navigator`,
     `behavior_server`, `waypoint_follower`, `map_server`, and both
     `local_costmap`/`global_costmap` (circular footprint via `robot_radius`,
     see `compute_footprint_radius`). This is a starter config covering the
@@ -340,10 +430,14 @@ def generate_nav2_params_yaml(robot: Robot) -> str:
     hand if this robot needs them).
 
     Raises `ValueError` (via `detect_nav2_suitability`) if `robot` isn't a
-    differential-drive base per `robot.metadata["drivetrain"]`, and
-    `robot_model.ValidationError` if the graph itself is invalid.
+    differential-drive or mecanum-drive base per
+    `robot.metadata["drivetrain"]`, and `robot_model.ValidationError` if the
+    graph itself is invalid.
     """
     _require_suitable(robot)
+
+    drivetrain_type = robot.metadata["drivetrain"]["type"]  # guaranteed by _require_suitable
+    is_mecanum = drivetrain_type == _MECANUM_DRIVE
 
     base_frame = robot.root_link().name  # type: ignore[union-attr]  -- guaranteed by validate()
     footprint_radius, skipped_mesh_links = compute_footprint_radius(robot)
@@ -372,15 +466,28 @@ def generate_nav2_params_yaml(robot: Robot) -> str:
             "default -- update if yours differs"
         )
 
+    if is_mecanum:
+        controller_plugin_comment = f"""# Controller plugin: {MECANUM_CONTROLLER_PLUGIN} (motion_model: "Omni")
+#   Chosen over nav2_regulated_pure_pursuit_controller (used for a
+#   differential-drive robot by this same generator) because Regulated Pure
+#   Pursuit is fundamentally non-holonomic. This robot is mecanum-drive, a
+#   truly holonomic base, and MPPI's own README documents `motion_model` as
+#   one of [DiffDrive, Omni, Ackermann] with `vy_max`/`vy_std` explicitly
+#   described as applying "if holonomic" -- see module docstring for the
+#   full citation, confirmed for real against this machine's installed
+#   nav2_mppi_controller package pluginlib exports."""
+    else:
+        controller_plugin_comment = f"""# Controller plugin: {CONTROLLER_PLUGIN}
+#   Chosen over dwb_core::DWBLocalPlanner (nav2_bringup's own shipped default)
+#   because Nav2's docs recommend Regulated Pure Pursuit specifically for
+#   differential-drive bases like this one, with far fewer parameters to tune."""
+
     header = f"""# Nav2 parameter file for robot "{robot.name}", generated by Fusion2ROS
 # (fusion_addin/generators/nav2.py). Structure follows nav2_bringup's
 # standard nav2_params.yaml (see https://github.com/ros-navigation/navigation2
 # nav2_bringup/params/nav2_params.yaml).
 #
-# Controller plugin: {CONTROLLER_PLUGIN}
-#   Chosen over dwb_core::DWBLocalPlanner (nav2_bringup's own shipped default)
-#   because Nav2's docs recommend Regulated Pure Pursuit specifically for
-#   differential-drive bases like this one, with far fewer parameters to tune.
+{controller_plugin_comment}
 # Planner plugin: {PLANNER_PLUGIN}
 #   The long-standing default grid planner; unchanged across recent Nav2
 #   releases, so there was no real alternative to weigh here.
@@ -417,7 +524,7 @@ amcl:
     recovery_alpha_fast: 0.0
     recovery_alpha_slow: 0.0
     resample_interval: 1
-    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    robot_model_type: "{_AMCL_ROBOT_MODEL_TYPE[drivetrain_type]}"
     save_pose_rate: 0.5
     sigma_hit: 0.2
     tf_broadcast: true
@@ -431,7 +538,119 @@ amcl:
     scan_topic: {scan_topic}
 """
 
-    controller_server = f"""
+    if is_mecanum:
+        # MPPI config for a holonomic (mecanum) base. Parameter names/values
+        # (other than motion_model/vy_max/critics choices, adapted for
+        # holonomic motion -- see module docstring) mirror the canonical
+        # example block in nav2_mppi_controller's own README (confirmed
+        # against https://api.nav2.org/nav2-jazzy/html/md_nav2_mppi_controller_README.html
+        # and this machine's installed package). TwirlingCritic is added
+        # (not present in that README's DiffDrive example) specifically
+        # because nav2_mppi_controller's own critics.xml documents it as
+        # for "preventing twirling behavior when using omnidirectional
+        # models" -- a failure mode unique to a holonomic base. The
+        # Ackermann-only `AckermannConstraints`/`min_turning_r` block from
+        # that same example is dropped since it does not apply to Omni.
+        controller_server = f"""
+controller_server:
+  ros__parameters:
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+    general_goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
+    FollowPath:
+      plugin: "{MECANUM_CONTROLLER_PLUGIN}"
+      time_steps: 56
+      model_dt: 0.05
+      batch_size: 2000
+      vx_std: 0.2
+      vy_std: 0.2
+      wz_std: 0.4
+      vx_max: 0.5
+      vx_min: -0.35
+      vy_max: 0.5
+      wz_max: 1.9
+      iteration_count: 1
+      prune_distance: 1.7
+      transform_tolerance: 0.1
+      temperature: 0.3
+      gamma: 0.015
+      motion_model: "Omni"
+      visualize: false
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic", "TwirlingCritic"]
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.81
+        critical_cost: 300.0
+        consider_footprint: true
+        collision_cost: 1000000.0
+        near_goal_distance: 1.0
+        trajectory_point_step: 2
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+      TwirlingCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 10.0
+"""
+    else:
+        controller_server = f"""
 controller_server:
   ros__parameters:
     controller_frequency: 20.0
