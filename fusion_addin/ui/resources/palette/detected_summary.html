@@ -282,8 +282,27 @@
   // sendInfoToHTML call fires before this script has registered the handler
   // above. The add-in's PaletteHTMLEventHandler (command.py) reacts to this
   // exact action by (re-)sending the latest known summary.
-  function signalReady() {
+  //
+  // REAL BUG FOUND AND FIXED HERE: `window.adsk` is injected into the page
+  // asynchronously by Fusion's web view and is NOT guaranteed to exist yet
+  // at DOMContentLoaded. The original version of this function silently
+  // gave up the very first time that race was lost, with no retry -- so
+  // "ready" was never sent, the add-in's one-time initial sendInfoToHTML
+  // push (sent immediately after palette creation, almost certainly before
+  // this page had even started loading) had nowhere to land, and this
+  // page's own static placeholder markup (see the #status/#links-tree/
+  // #joints-tree "(none detected)"/"Waiting for detection results..."
+  // initial content above) stayed showing FOREVER -- even once the Python
+  // side had already computed a real (or correctly-empty) result -- unless
+  // the user happened to change the root-occurrence selection again, which
+  // is the only other thing that re-triggers a push. Retrying with a capped
+  // backoff instead of giving up on the first miss fixes this.
+  function signalReady(attempt) {
+    attempt = attempt || 0;
     if (!window.adsk || typeof window.adsk.fusionSendData !== "function") {
+      if (attempt < 50) {  // ~10s of retries at 200ms -- generous, still bounded
+        setTimeout(function () { signalReady(attempt + 1); }, 200);
+      }
       return;
     }
     try {
@@ -295,8 +314,9 @@
         result.catch(function () { /* no-op: next refresh will retry anyway */ });
       }
     } catch (e) {
-      // adsk.fusionSendData not wired up yet in some load orders -- the next
-      // input-changed refresh on the Python side will simply try again.
+      if (attempt < 50) {
+        setTimeout(function () { signalReady(attempt + 1); }, 200);
+      }
     }
   }
 
