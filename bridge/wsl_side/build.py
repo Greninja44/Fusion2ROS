@@ -25,8 +25,10 @@ from __future__ import annotations
 import shlex
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Optional
 
 
 def copy_package_to_workspace(package_dir: Path, ros_ws_src: Path) -> Path:
@@ -88,6 +90,7 @@ def colcon_build(
     package_name: str,
     ros_setup: Path = Path("/opt/ros/lyrical/setup.bash"),
     timeout: float = 300.0,
+    on_output_line: Optional[Callable[[str], None]] = None,
 ) -> BuildResult:
     """Run `colcon build --packages-select <package_name>` in `ros_ws`.
 
@@ -107,6 +110,21 @@ def colcon_build(
     Returns a BuildResult even on timeout or launch failure (e.g. missing
     `bash`/`colcon`) rather than raising, so callers (ultimately the Fusion
     UI) always get a reportable BUILD SUCCESS / BUILD FAILED outcome.
+
+    on_output_line (default None, opt-in): if given, called once per line
+    of stdout/stderr AS THE BUILD RUNS (not just after it finishes) -- a
+    colcon build of anything non-trivial takes real wall-clock time, and
+    without this a caller (the Fusion "Build in WSL" command, in
+    particular) has nothing to show but a frozen-looking dialog until the
+    whole thing completes. When set, this switches from the simple
+    subprocess.run() blocking call to a threaded Popen + line-reader pair
+    (stdout and stderr each pumped on their own thread so neither can fill
+    its OS pipe buffer and deadlock the other) -- the DEFAULT (no callback)
+    path is untouched and still uses subprocess.run(), so existing callers
+    see zero behavior change. Interleaving between stdout/stderr lines as
+    delivered to the callback is not guaranteed (they're read on separate
+    threads) -- the final BuildResult.stdout/stderr are still each fully
+    separate and in their own original order, exactly as before.
     """
     ros_ws = Path(ros_ws)
     command = (
@@ -115,24 +133,80 @@ def colcon_build(
         f"colcon build --packages-select {shlex.quote(package_name)}"
     )
 
-    try:
-        proc = subprocess.run(
-            ["bash", "-lc", command],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+    if on_output_line is None:
+        try:
+            proc = subprocess.run(
+                ["bash", "-lc", command],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode(errors="replace")
+            stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode(errors="replace")
+            stderr += f"\n[bridge] colcon build timed out after {timeout}s"
+            return BuildResult(success=False, stdout=stdout, stderr=stderr, returncode=-1)
+        except OSError as exc:
+            return BuildResult(
+                success=False, stdout="", stderr=f"[bridge] failed to launch build: {exc}", returncode=-1
+            )
+
+        return BuildResult(
+            success=(proc.returncode == 0),
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            returncode=proc.returncode,
         )
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode(errors="replace")
-        stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode(errors="replace")
-        stderr += f"\n[bridge] colcon build timed out after {timeout}s"
-        return BuildResult(success=False, stdout=stdout, stderr=stderr, returncode=-1)
+
+    try:
+        proc = subprocess.Popen(
+            ["bash", "-lc", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
     except OSError as exc:
         return BuildResult(success=False, stdout="", stderr=f"[bridge] failed to launch build: {exc}", returncode=-1)
 
+    stdout_lines: list = []
+    stderr_lines: list = []
+
+    def _pump(stream, sink: list) -> None:
+        for line in iter(stream.readline, ""):
+            sink.append(line)
+            on_output_line(line.rstrip("\n"))
+        stream.close()
+
+    stdout_thread = threading.Thread(target=_pump, args=(proc.stdout, stdout_lines), daemon=True)
+    stderr_thread = threading.Thread(target=_pump, args=(proc.stderr, stderr_lines), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        proc.wait()
+
+    # The pump threads see EOF (readline returns "") once the process's
+    # pipes close, which happens at/around process exit -- give them a
+    # bounded moment to drain rather than joining forever.
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+
+    stdout = "".join(stdout_lines)
+    stderr = "".join(stderr_lines)
+
+    if timed_out:
+        stderr += f"\n[bridge] colcon build timed out after {timeout}s"
+        return BuildResult(success=False, stdout=stdout, stderr=stderr, returncode=-1)
+
     return BuildResult(
         success=(proc.returncode == 0),
-        stdout=proc.stdout,
-        stderr=proc.stderr,
+        stdout=stdout,
+        stderr=stderr,
         returncode=proc.returncode,
     )
