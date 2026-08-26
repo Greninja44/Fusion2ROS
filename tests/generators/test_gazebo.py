@@ -183,6 +183,24 @@ def test_world_sdf_has_required_gz_sim_system_plugins():
     assert "gz-sim-scene-broadcaster-system" in plugin_filenames
 
 
+def test_world_sdf_has_sensor_system_plugins():
+    """Regression: fusion_addin/generators/sensors.py's generated <sensor>
+    elements (camera/lidar/imu) produce no live Gazebo Transport topics at
+    all without gz-sim-sensors-system loaded in the world, and an IMU
+    sensor specifically also needs gz-sim-imu-system -- confirmed via a
+    real before/after gz-sim headless topic-list comparison. Both plugins'
+    exact filename/name and the Sensors plugin's <render_engine> child are
+    copied verbatim from this machine's installed
+    ros_gz_sim_demos/worlds/default.sdf, same as the other system plugins."""
+    world = ET.fromstring(generate_world_sdf()).find("world")
+    plugins = {p.attrib["filename"]: p for p in world.findall("plugin")}
+    assert "gz-sim-sensors-system" in plugins
+    assert plugins["gz-sim-sensors-system"].attrib["name"] == "gz::sim::systems::Sensors"
+    assert plugins["gz-sim-sensors-system"].findtext("render_engine") == "ogre2"
+    assert "gz-sim-imu-system" in plugins
+    assert plugins["gz-sim-imu-system"].attrib["name"] == "gz::sim::systems::Imu"
+
+
 # --- generate_spawn_launch -----------------------------------------------
 
 

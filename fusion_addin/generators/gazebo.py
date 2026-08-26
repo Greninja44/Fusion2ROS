@@ -209,13 +209,24 @@ def generate_world_sdf(world_name: str = "empty") -> str:
     ``/opt/ros/lyrical/share/ros_gz_sim_demos/worlds/default.sdf`` --  a
     real, gz-sim-native (SDF 1.8) world file that ships with this machine's
     actual installed ``ros_gz_sim_demos`` package, read directly off disk in
-    this session. This function drops that file's GUI-plugin block,
-    atmosphere/scene tuning, and extra sensor-support plugins
-    (Contact/Imu/AirPressure/Sensors) as not needed for the minimal
-    "does a simple robot launch" proof this task targets; Physics,
-    UserCommands, and SceneBroadcaster are kept because they're the load-
-    bearing three (stepping physics, spawning, and state broadcast/GUI
-    sync respectively).
+    this session. This function drops that file's GUI-plugin block and
+    atmosphere/scene tuning; Physics, UserCommands, and SceneBroadcaster are
+    kept because they're load-bearing (stepping physics, spawning, and
+    state broadcast/GUI sync respectively).
+
+    The Sensors and Imu system plugins ARE included (unlike an earlier
+    version of this function, which dropped them as "not needed for the
+    minimal does-a-simple-robot-launch proof") -- confirmed load-bearing for
+    real: fusion_addin/generators/sensors.py's generated <sensor> elements
+    (camera/lidar/imu) do not actually produce any live Gazebo Transport
+    topics without gz-sim-sensors-system loaded in the world (confirmed via
+    a live gz-sim headless run: before/after topic list comparison), and an
+    IMU sensor specifically additionally needs gz-sim-imu-system (confirmed
+    the same way). Both plugins' exact filename/name and the Sensors
+    plugin's <render_engine>ogre2</render_engine> child are copied verbatim
+    from the same real installed default.sdf referenced above. Contact and
+    AirPressure are still dropped -- nothing this project generates uses
+    either.
 
     Real-run confirmation: this exact template was written to a temp file
     and run for real in this session as
@@ -229,6 +240,10 @@ def generate_world_sdf(world_name: str = "empty") -> str:
     <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
 
     <gravity>0 0 -9.8</gravity>
 
