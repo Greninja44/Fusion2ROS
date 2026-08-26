@@ -20,6 +20,7 @@ adding a redundant "have you built?" check here.
 from __future__ import annotations
 
 import traceback
+from pathlib import Path
 
 import adsk.core
 
@@ -37,6 +38,9 @@ CMD_NAME = "Launch RViz"
 CMD_DESCRIPTION = "Run 'ros2 launch <package> display.launch.py' inside WSL for a built package."
 PANEL_ID = "SolidCreatePanel"
 DEFAULT_LAUNCH_FILE = "display.launch.py"
+# See command.py's RESOURCE_FOLDER comment for the confirmed
+# addButtonDefinition/resourceFolder icon-naming convention this relies on.
+RESOURCE_FOLDER = str(Path(__file__).parent / "resources" / "launch")
 
 _handlers = []
 
@@ -46,7 +50,7 @@ def register(ui: "adsk.core.UserInterface") -> None:
     if existing:
         existing.deleteMe()
 
-    cmd_def = ui.commandDefinitions.addButtonDefinition(CMD_ID, CMD_NAME, CMD_DESCRIPTION)
+    cmd_def = ui.commandDefinitions.addButtonDefinition(CMD_ID, CMD_NAME, CMD_DESCRIPTION, RESOURCE_FOLDER)
     on_created = LaunchCommandCreatedHandler()
     cmd_def.commandCreated.add(on_created)
     _handlers.append(on_created)
