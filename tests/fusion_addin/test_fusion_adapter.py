@@ -56,7 +56,10 @@ def _fake_occurrence(name):
 
 def _fake_revolute_motion(axis=(0.0, 0.0, 1.0), lower=-1.0, upper=1.0):
     motion = MagicMock()
-    motion.jointType.name = "RevoluteJointType"
+    # Real Fusion returns a plain int here, not an object with .name -- see
+    # fusion_adapter._JOINT_TYPE_INT_TO_STR's docstring for the real bug this
+    # matches (1 == RevoluteJointType, confirmed via JointTypes.htm).
+    motion.jointType = 1
     motion.rotationAxisVector = _point3d(*axis)
     motion.rotationLimits = SimpleNamespace(
         isMinimumValueEnabled=lower is not None,
@@ -69,8 +72,44 @@ def _fake_revolute_motion(axis=(0.0, 0.0, 1.0), lower=-1.0, upper=1.0):
 
 def _fake_rigid_motion():
     motion = MagicMock()
-    motion.jointType.name = "RigidJointType"
+    motion.jointType = 0  # RigidJointType, confirmed via JointTypes.htm
     return motion
+
+
+# ---------------------------------------------------------------------------
+# jointType int -> string mapping -- the SECOND real bug fix (found live
+# immediately after the As-Built Joint fix, once a design actually had real
+# joints to report: motion.jointType.name raised "'int' object has no
+# attribute 'name'", since Fusion returns a plain int here).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw_value,expected",
+    [
+        (0, "RigidJointType"),
+        (1, "RevoluteJointType"),
+        (2, "SliderJointType"),
+        (3, "CylindricalJointType"),
+        (4, "PinSlotJointType"),
+        (5, "PlanarJointType"),
+        (6, "BallJointType"),
+        (7, "InferredJointType"),
+    ],
+)
+def test_joint_type_int_mapping(raw_value, expected):
+    motion = MagicMock()
+    motion.jointType = raw_value
+    joint_type_str, _, _, _ = fa._joint_motion_kinematics(motion)
+    assert joint_type_str == expected
+
+
+def test_unknown_joint_type_int_does_not_crash():
+    motion = MagicMock()
+    motion.jointType = 999
+    joint_type_str, axis, lower, upper = fa._joint_motion_kinematics(motion)
+    assert joint_type_str == "UnknownJointTypeInt_999"
+    assert axis is None and lower is None and upper is None
 
 
 # ---------------------------------------------------------------------------

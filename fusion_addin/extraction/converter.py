@@ -51,11 +51,18 @@ _PRISMATIC_TYPES = {"SliderJointType"}
 # than "anything else") so the error message is precise and so a genuinely
 # unrecognized string (typo, future Fusion joint type, etc.) is reported
 # differently from a *known-but-unsupported* one.
+#
+# InferredJointType added after confirming, live, that adsk.fusion.JointTypes
+# has an 8th member beyond the seven originally documented here (see
+# fusion_adapter.py's _JOINT_TYPE_INT_TO_STR comment) -- its exact motion
+# semantics aren't confirmed, so it's treated as unsupported rather than
+# guessed at, same as the other multi-DOF types.
 _KNOWN_UNSUPPORTED_TYPES = {
     "CylindricalJointType",
     "PinSlotJointType",
     "PlanarJointType",
     "BallJointType",
+    "InferredJointType",
 }
 
 

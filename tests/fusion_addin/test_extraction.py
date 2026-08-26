@@ -313,6 +313,18 @@ def test_known_unsupported_joint_type_raises_specific_error():
         build_robot_model(make_two_link_reader(joint_info), "bad_robot")
 
 
+def test_inferred_joint_type_raises_specific_error():
+    joint_info = FusionJointInfo(
+        name="inferred_joint",
+        joint_type="InferredJointType",
+        occurrence_one="base:1",
+        occurrence_two="top:1",
+        origin=FusionPose(),
+    )
+    with pytest.raises(UnsupportedJointTypeError, match="InferredJointType"):
+        build_robot_model(make_two_link_reader(joint_info), "bad_robot")
+
+
 def test_unrecognized_joint_type_string_raises_not_silently_dropped():
     joint_info = FusionJointInfo(
         name="mystery_joint",

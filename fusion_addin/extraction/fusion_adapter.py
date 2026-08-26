@@ -38,28 +38,28 @@ except ImportError:  # pragma: no cover - exercised only outside Fusion
     _ADSK_AVAILABLE = False
 
 
-# Fusion joint types with a single-DOF (or zero-DOF) URDF equivalent, plus
-# the ones that don't -- confirmed via help.autodesk.com/.../JointMotion_jointType.htm
-# and the "Joint types" concept page (GUID-8818AE31-958A-4A59-989B-9875A174C67A):
-# Fusion has exactly seven joint types -- Rigid, Revolute, Slider, Cylindrical,
-# Pin-Slot, Planar, Ball. The Python enum member spellings themselves
-# (`adsk.fusion.JointTypes.RigidJointType` etc.) were NOT found spelled out
-# verbatim on any single fetched doc page (the JointTypes enum reference page
-# render did not include the member list in what we could fetch); the names
-# used here follow the consistent pattern seen across every other joint-type
-# doc page (RevoluteJointMotion, SliderJointMotion, RigidJointMotion, ...)
-# where the *Motion class name matches "<Name>JointMotion" and the concept
-# docs list the same seven names with the same capitalization. This mapping
-# should be double-checked against a live `dir(adsk.fusion.JointTypes)` in a
-# real Fusion session before shipping.
-_JOINT_TYPE_ENUM_TO_STR = {
-    "RigidJointType": "RigidJointType",
-    "RevoluteJointType": "RevoluteJointType",
-    "SliderJointType": "SliderJointType",
-    "CylindricalJointType": "CylindricalJointType",
-    "PinSlotJointType": "PinSlotJointType",
-    "PlanarJointType": "PlanarJointType",
-    "BallJointType": "BallJointType",
+# REAL BUG FOUND AND FIXED HERE (live, from a real Fusion session):
+# `motion.jointType` does NOT return a rich enum object with a `.name`
+# attribute -- Fusion's Python bindings surface `adsk.fusion.JointTypes` as
+# plain integer constants (typical of its SWIG-generated bindings), so the
+# original `motion.jointType.name` call failed with exactly
+# "'int' object has no attribute 'name'" the moment a real joint was found
+# (this had never been exercised before, since every design tested until
+# now had zero real joints of either kind). Confirmed the exact integer
+# values live via JointTypes.htm (fetched during this fix): RigidJointType=0,
+# RevoluteJointType=1, SliderJointType=2, CylindricalJointType=3,
+# PinSlotJointType=4, PlanarJointType=5, BallJointType=6, InferredJointType=7
+# -- an 8th member this project hadn't accounted for at all (see
+# converter.py's _KNOWN_UNSUPPORTED_TYPES, updated alongside this fix).
+_JOINT_TYPE_INT_TO_STR = {
+    0: "RigidJointType",
+    1: "RevoluteJointType",
+    2: "SliderJointType",
+    3: "CylindricalJointType",
+    4: "PinSlotJointType",
+    5: "PlanarJointType",
+    6: "BallJointType",
+    7: "InferredJointType",
 }
 
 
@@ -253,10 +253,12 @@ def _joint_motion_kinematics(motion) -> tuple:  # motion: adsk.fusion.JointMotio
     `.jointMotion` as the same JointMotion-derived object hierarchy
     (JointMotion_jointType.htm documents `jointType` on the base JointMotion
     type itself, not per-subtype), so the same dispatch applies to either.
-    Confirmed via JointMotion_jointType.htm as in the original (pre-As-Built)
-    version of this function; see its history for that citation.
+    Confirmed via JointMotion_jointType.htm that `jointType` returns a
+    JointTypes value; see _JOINT_TYPE_INT_TO_STR's own comment for why that
+    value is read as a plain int, not via a `.name` attribute.
     """
-    joint_type_str = motion.jointType.name  # UNCONFIRMED: JointTypes enum member -> str via .name
+    raw_type = motion.jointType
+    joint_type_str = _JOINT_TYPE_INT_TO_STR.get(raw_type, f"UnknownJointTypeInt_{raw_type!r}")
 
     axis: Optional[Vec3] = None
     lower: Optional[float] = None
