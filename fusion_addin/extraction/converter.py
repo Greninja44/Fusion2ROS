@@ -285,6 +285,32 @@ def _convert_inertial(occ: FusionOccurrence) -> Inertial:
     )
 
 
+def _bounding_box_size(occ: FusionOccurrence) -> Optional[Vec3]:
+    """Converts a FusionOccurrence's optional world-aligned bounding box into
+    a full-extent (dx, dy, dz) size in meters, for use as a simplified box
+    collision PROXY (see fusion_addin/app.py's attach_collision_proxies).
+
+    Deliberate simplification, in the same spirit as _convert_inertial's own
+    documented approximations elsewhere in this file: this is the occurrence's
+    bounding box in Fusion's flattened WORLD/assembly frame, axis-aligned to
+    world axes -- it is NOT rotated into the occurrence's own local frame the
+    way _convert_inertial does for the inertia tensor. For a link whose local
+    frame is rotated relative to the world, a world-aligned box can be larger
+    than a tightly-oriented box would be. That's an accepted, honest trade-off
+    for a cheap collision proxy, not a bug: a slightly oversized world-aligned
+    box is still far cheaper for a physics engine than the full visual mesh,
+    and correcting for orientation would require the occurrence's local body
+    geometry, not just its bounding box -- out of scope here.
+
+    Returns None if the occurrence has no bounding_box data (e.g. a fake/test
+    reader that didn't set one, or a real occurrence with no visible geometry).
+    """
+    if occ.bounding_box is None:
+        return None
+    min_corner, max_corner = occ.bounding_box
+    return tuple((max_corner[i] - min_corner[i]) * CM_TO_M for i in range(3))  # type: ignore[return-value]
+
+
 _INVALID_NAME_CHARS = str.maketrans({c: "_" for c in " :/\\.()[]{}<>"})
 
 
@@ -360,16 +386,24 @@ def build_robot_model(reader: FusionDesignReader, robot_name: str) -> Robot:
     for name, occ in occurrences.items():
         parent_joint = joint_by_child.get(name)
         parent_link = sanitized[parent_joint.occurrence_one] if parent_joint else None
+        metadata: Dict[str, object] = {
+            "fusion_occurrence": name,
+            "fusion_body_names": list(occ.body_names),
+        }
+        bbox_size = _bounding_box_size(occ)
+        if bbox_size is not None:
+            # Present only when Fusion supplied a bounding box (see
+            # FusionOccurrence.bounding_box) -- absent, not None, when it
+            # didn't, so downstream code (attach_collision_proxies) can use
+            # plain `.get("bounding_box_size")` / `in` checks.
+            metadata["bounding_box_size"] = bbox_size
         links.append(
             Link(
                 name=sanitized[name],
                 parent=parent_link,
                 origin=Pose.IDENTITY,
                 inertial=_convert_inertial(occ),
-                metadata={
-                    "fusion_occurrence": name,
-                    "fusion_body_names": list(occ.body_names),
-                },
+                metadata=metadata,
             )
         )
 

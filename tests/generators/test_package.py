@@ -197,6 +197,56 @@ def test_mesh_files_rejects_unsupported_type(tmp_path):
         generate_package(robot, TRIVIAL_URDF_XACRO, {"bad.stl": "not bytes or Path"}, tmp_path)
 
 
+def test_extra_files_written_and_installed(tmp_path):
+    # This is the integration point ros2_control/gazebo/moveit/nav2's
+    # generated config/launch text lands through -- confirm it actually
+    # reaches disk under the package dir, in a config/ dir the CMakeLists
+    # installs, alongside str-vs-bytes handling like mesh_files has.
+    robot = make_demo_robot()
+    pkg_dir = generate_package(
+        robot,
+        TRIVIAL_URDF_XACRO,
+        {},
+        tmp_path,
+        extra_files={
+            "config/controllers.yaml": "controller_manager:\n  ros__parameters: {}\n",
+            "launch/control.launch.py": "def generate_launch_description():\n    pass\n",
+            "config/binary.bin": b"\x00\x01\x02",
+        },
+    )
+
+    assert (pkg_dir / "config" / "controllers.yaml").read_text() == "controller_manager:\n  ros__parameters: {}\n"
+    assert (pkg_dir / "launch" / "control.launch.py").is_file()
+    assert (pkg_dir / "config" / "binary.bin").read_bytes() == b"\x00\x01\x02"
+    assert "config" in (pkg_dir / "CMakeLists.txt").read_text()
+
+
+def test_extra_files_introducing_a_new_top_level_dir_is_installed(tmp_path):
+    # Regression: gazebo.py's generated worlds/empty.sdf sat in the package
+    # but was never installed by CMakeLists (which hardcoded a fixed
+    # urdf/meshes/launch/rviz/config list) -- `gz sim` reported "Unable to
+    # find or download file ... worlds/empty.sdf" at launch despite a
+    # successful colcon build. install_dirs must be computed from what's
+    # actually on disk, not a fixed list, so any generator's new top-level
+    # directory (not just the ones known about today) gets installed too.
+    robot = make_demo_robot()
+    pkg_dir = generate_package(
+        robot, TRIVIAL_URDF_XACRO, {}, tmp_path, extra_files={"worlds/empty.sdf": "<sdf version='1.8'></sdf>\n"}
+    )
+
+    assert (pkg_dir / "worlds" / "empty.sdf").is_file()
+    cmake_text = (pkg_dir / "CMakeLists.txt").read_text()
+    assert "worlds" in cmake_text.split("DIRECTORY")[1].split("DESTINATION")[0]
+
+
+def test_extra_files_rejects_unsupported_type(tmp_path):
+    robot = make_demo_robot()
+    with pytest.raises(TypeError):
+        generate_package(
+            robot, TRIVIAL_URDF_XACRO, {}, tmp_path, extra_files={"config/bad.yaml": 12345}
+        )
+
+
 @pytest.mark.skipif(
     shutil.which("colcon") is None or not ROS_SETUP.is_file(),
     reason="colcon and/or /opt/ros/lyrical/setup.bash not available in this environment",

@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict, Optional, Union
 
 from robot_model import Robot
 
 MeshSource = Union[bytes, Path]
+FileContent = Union[str, bytes]
 
 
 def generate_package(
@@ -32,6 +33,7 @@ def generate_package(
     urdf_xacro: str,
     mesh_files: Dict[str, MeshSource],
     output_dir: Path,
+    extra_files: Optional[Dict[str, FileContent]] = None,
 ) -> Path:
     """Write a complete ROS 2 package tree for ``robot`` under ``output_dir``.
 
@@ -41,6 +43,14 @@ def generate_package(
     Idempotent: if the target package directory already exists, it is
     removed and rebuilt from scratch so no file from a previous generation
     (e.g. a mesh that is no longer referenced) lingers.
+
+    ``extra_files`` writes additional package-relative files (e.g.
+    ``"config/controllers.yaml"``, ``"launch/control.launch.py"``,
+    ``"config/<robot>.srdf"``) beyond the standard urdf/meshes/launch/rviz
+    set -- str values are written as text, bytes as binary. This is the
+    integration point the ros2_control/Gazebo/MoveIt/Nav2 generators plug
+    into: each of those produces plain XML/YAML/launch text, and this is
+    where it actually lands on disk as part of one coherent package.
     """
     output_dir = Path(output_dir)
     pkg_dir = output_dir / robot.name
@@ -52,17 +62,41 @@ def generate_package(
     meshes_dir = pkg_dir / "meshes"
     launch_dir = pkg_dir / "launch"
     rviz_dir = pkg_dir / "rviz"
-    for d in (pkg_dir, urdf_dir, meshes_dir, launch_dir, rviz_dir):
+    config_dir = pkg_dir / "config"
+    for d in (pkg_dir, urdf_dir, meshes_dir, launch_dir, rviz_dir, config_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     _write_package_xml(robot, pkg_dir)
-    _write_cmakelists(robot, pkg_dir)
     _write_urdf_xacro(robot, urdf_dir, urdf_xacro)
     _write_meshes(mesh_files, meshes_dir)
     _write_launch(robot, launch_dir)
     _write_rviz(robot, rviz_dir)
+    _write_extra_files(extra_files or {}, pkg_dir)
+
+    # Written last: extra_files can introduce entirely new top-level dirs
+    # (e.g. gazebo.py's "worlds/") beyond the fixed urdf/meshes/launch/rviz/
+    # config set -- discovering what's actually on disk here, rather than
+    # hardcoding a directory list, is what makes CMakeLists actually install
+    # them. (A real bug this exact gap caused: a generated worlds/empty.sdf
+    # sat in the package but was never installed, so `gz sim` reported
+    # "Unable to find or download file ... worlds/empty.sdf" at launch even
+    # though colcon build had reported success.)
+    install_dirs = sorted(p.name for p in pkg_dir.iterdir() if p.is_dir())
+    _write_cmakelists(robot, pkg_dir, install_dirs)
 
     return pkg_dir
+
+
+def _write_extra_files(extra_files: Dict[str, FileContent], pkg_dir: Path) -> None:
+    for rel_path, content in extra_files.items():
+        dest = pkg_dir / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, str):
+            dest.write_text(content, encoding="utf-8")
+        elif isinstance(content, (bytes, bytearray)):
+            dest.write_bytes(bytes(content))
+        else:
+            raise TypeError(f"extra_files[{rel_path!r}] must be str or bytes, got {type(content).__name__}")
 
 
 def _write_package_xml(robot: Robot, pkg_dir: Path) -> None:
@@ -108,7 +142,8 @@ def _write_package_xml(robot: Robot, pkg_dir: Path) -> None:
     (pkg_dir / "package.xml").write_text(content, encoding="utf-8")
 
 
-def _write_cmakelists(robot: Robot, pkg_dir: Path) -> None:
+def _write_cmakelists(robot: Robot, pkg_dir: Path, install_dirs) -> None:
+    dir_lines = "\n".join(f"    {d}" for d in install_dirs)
     content = f"""cmake_minimum_required(VERSION 3.10)
 project({robot.name})
 
@@ -116,10 +151,7 @@ find_package(ament_cmake REQUIRED)
 
 install(
   DIRECTORY
-    urdf
-    meshes
-    launch
-    rviz
+{dir_lines}
   DESTINATION share/${{PROJECT_NAME}}
 )
 
