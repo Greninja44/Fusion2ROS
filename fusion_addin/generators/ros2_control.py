@@ -14,12 +14,12 @@ later, separate integration step. It is deliberately decoupled from
 `urdf.py`/`app.py`/`package.py`: it only reads `robot_model.Robot` and never
 imports those modules.
 
-Differential-drive vs. arm/manipulator convention
---------------------------------------------------
+Differential-drive / mecanum-drive vs. arm/manipulator convention
+-------------------------------------------------------------------
 `Robot` has no built-in notion of "this is a mobile base" -- it's a general
 kinematic tree. Per the documented, shared convention (see the parallel
-Nav2-generator work and the project brief), a differential-drive robot is
-identified purely by `Robot.metadata["drivetrain"]`::
+Nav2-generator work and the project brief), a mobile base is identified
+purely by `Robot.metadata["drivetrain"]`, which supports two shapes::
 
     robot.metadata["drivetrain"] = {
         "type": "differential_drive",
@@ -29,11 +29,38 @@ identified purely by `Robot.metadata["drivetrain"]`::
         "wheel_radius": <float, meters>,
     }
 
-If that key is absent (or its "type" isn't "differential_drive"), every
-non-fixed joint is treated as an individual arm/manipulator joint, driven by
-a `joint_trajectory_controller`. If present, the two named wheel joints are
-excluded from that per-joint treatment, get `velocity`-only command/state
-interfaces, and are driven by a `diff_drive_controller` instead.
+    robot.metadata["drivetrain"] = {
+        "type": "mecanum_drive",
+        "front_left_wheel_joint": "<joint name, CONTINUOUS or REVOLUTE>",
+        "front_right_wheel_joint": "<joint name>",
+        "back_left_wheel_joint": "<joint name>",
+        "back_right_wheel_joint": "<joint name>",
+        "wheel_radius": <float, meters>,
+        "sum_of_robot_center_projection_on_x_y_axis": <float, meters>,
+    }
+
+If the "drivetrain" key is absent entirely, every non-fixed joint is treated
+as an individual arm/manipulator joint, driven by a
+`joint_trajectory_controller`. If present with `"type": "differential_drive"`,
+the two named wheel joints are excluded from that per-joint treatment, get
+`velocity`-only command/state interfaces, and are driven by a
+`diff_drive_controller` instead. If present with `"type": "mecanum_drive"`,
+the four named wheel joints get the same `velocity`-only treatment and are
+driven by a `mecanum_drive_controller` instead. Any OTHER `"type"` value
+raises `ValueError` naming the bad value and the supported set -- it is never
+silently treated as "no drivetrain" (a real bug this module used to have:
+`_drivetrain_info` would return `None` for an unrecognized `type`, silently
+falling through to arm/manipulator handling instead of erroring).
+
+`sum_of_robot_center_projection_on_x_y_axis` is carried into our metadata
+convention under the same name (lower-cased for Python style) as
+`mecanum_drive_controller`'s own
+`kinematics.sum_of_robot_center_projection_on_X_Y_axis` parameter, rather
+than inventing a new name for it: per that controller's own parameter
+description (see below), it is "lx + ly", where lx/ly are the distances from
+the robot's center to the wheels projected onto the X and Y axes
+respectively -- i.e. half the wheelbase plus half the track width for a
+rectangular 4-wheel layout.
 
 API surface verified against real ros2_control sources/docs
 -------------------------------------------------------------
@@ -70,6 +97,22 @@ API surface verified against real ros2_control sources/docs
   `--param-file` on the spawner instead of a Python-object description --
   both are real, documented patterns; this module follows the former since
   that's the shape the project brief explicitly asked for).
+* `mecanum_drive_controller/MecanumDriveController` plugin type string --
+  confirmed for real against this machine's installed
+  `/opt/ros/lyrical/share/mecanum_drive_controller/mecanum_drive_controller.xml`
+  pluginlib export (`<class name="mecanum_drive_controller/MecanumDriveController"
+  type="mecanum_drive_controller::MecanumDriveController"
+  base_class_type="controller_interface::ChainableControllerInterface">`).
+  Its exact parameter names (`front_left_wheel_command_joint_name`,
+  `front_right_wheel_command_joint_name`, `rear_left_wheel_command_joint_name`,
+  `rear_right_wheel_command_joint_name`, `kinematics.wheels_radius`,
+  `kinematics.sum_of_robot_center_projection_on_X_Y_axis`) are likewise
+  confirmed for real against this machine's installed
+  `mecanum_drive_controller_parameters.hpp` (the `generate_parameter_library`
+  header this controller declares its ROS parameters from) -- not guessed.
+  Note the controller's own params use "rear_*", not "back_*"; this module's
+  metadata convention uses "back_*" (matching the project brief) and maps it
+  onto the controller's real "rear_*" parameter names when emitting YAML.
 
 Design notes (mirrors urdf.py's philosophy)
 --------------------------------------------
@@ -105,46 +148,120 @@ _WHEEL_JOINT_TYPES = (JointType.CONTINUOUS, JointType.REVOLUTE)
 _JOINT_STATE_BROADCASTER_TYPE = "joint_state_broadcaster/JointStateBroadcaster"
 _JOINT_TRAJECTORY_CONTROLLER_TYPE = "joint_trajectory_controller/JointTrajectoryController"
 _DIFF_DRIVE_CONTROLLER_TYPE = "diff_drive_controller/DiffDriveController"
+_MECANUM_DRIVE_CONTROLLER_TYPE = "mecanum_drive_controller/MecanumDriveController"
+
+_DIFFERENTIAL_DRIVE = "differential_drive"
+_MECANUM_DRIVE = "mecanum_drive"
+_SUPPORTED_DRIVETRAIN_TYPES = (_DIFFERENTIAL_DRIVE, _MECANUM_DRIVE)
+
+_DIFF_DRIVE_WHEEL_KEYS = ("left_wheel_joint", "right_wheel_joint")
+_DIFF_DRIVE_REQUIRED_KEYS = _DIFF_DRIVE_WHEEL_KEYS + ("wheel_separation", "wheel_radius")
+
+# Order matches the metadata convention's own "front_left, front_right,
+# back_left, back_right" shape (see module docstring) -- NOT the controller's
+# internal "front_left, front_right, rear_right, rear_left" declaration
+# order, which doesn't matter here since we address each by name.
+_MECANUM_WHEEL_KEYS = (
+    "front_left_wheel_joint",
+    "front_right_wheel_joint",
+    "back_left_wheel_joint",
+    "back_right_wheel_joint",
+)
+_MECANUM_REQUIRED_KEYS = _MECANUM_WHEEL_KEYS + (
+    "wheel_radius",
+    "sum_of_robot_center_projection_on_x_y_axis",
+)
+# Maps our metadata's wheel-joint keys to mecanum_drive_controller's real
+# `*_command_joint_name` parameter names (confirmed against
+# mecanum_drive_controller_parameters.hpp -- see module docstring).
+_MECANUM_KEY_TO_COMMAND_PARAM = {
+    "front_left_wheel_joint": "front_left_wheel_command_joint_name",
+    "front_right_wheel_joint": "front_right_wheel_command_joint_name",
+    "back_left_wheel_joint": "rear_left_wheel_command_joint_name",
+    "back_right_wheel_joint": "rear_right_wheel_command_joint_name",
+}
 
 
 # --- shared helpers ---------------------------------------------------------
 
 
-def _drivetrain_info(robot: Robot) -> Optional[Dict[str, object]]:
-    """Return `robot.metadata["drivetrain"]` if it declares a
-    differential_drive drivetrain, else None. Validates the two referenced
-    wheel joints exist and are of a type continuous/revolute joints can
-    sensibly spin (per the documented convention) -- raises ValueError with
-    a clear message otherwise, rather than silently emitting nonsense.
-    """
-    drivetrain = (robot.metadata or {}).get("drivetrain")
-    if not drivetrain:
-        return None
-    if drivetrain.get("type") != "differential_drive":
-        return None
-
-    for key in ("left_wheel_joint", "right_wheel_joint", "wheel_separation", "wheel_radius"):
-        if key not in drivetrain:
-            raise ValueError(
-                f"Robot.metadata['drivetrain'] is missing required key {key!r}. "
-                "Expected: {'type': 'differential_drive', 'left_wheel_joint': ..., "
-                "'right_wheel_joint': ..., 'wheel_separation': ..., 'wheel_radius': ...}"
-            )
-
-    for side in ("left_wheel_joint", "right_wheel_joint"):
-        joint_name = drivetrain[side]
+def _validate_wheel_joints(robot: Robot, drivetrain: Dict[str, object], keys) -> None:
+    """Shared wheel-joint existence/type validation for both drivetrain
+    shapes -- raises ValueError naming the offending key/joint rather than
+    silently emitting nonsense."""
+    for key in keys:
+        joint_name = drivetrain[key]
         joint = robot.joint(joint_name)
         if joint is None:
             raise ValueError(
-                f"Robot.metadata['drivetrain'][{side!r}] names joint {joint_name!r}, "
+                f"Robot.metadata['drivetrain'][{key!r}] names joint {joint_name!r}, "
                 "which does not exist in robot.joints."
             )
         if joint.type not in _WHEEL_JOINT_TYPES:
             raise ValueError(
-                f"Robot.metadata['drivetrain'][{side!r}] joint {joint_name!r} has type "
+                f"Robot.metadata['drivetrain'][{key!r}] joint {joint_name!r} has type "
                 f"{joint.type.value!r}; a drivetrain wheel joint must be "
                 "JointType.CONTINUOUS or JointType.REVOLUTE."
             )
+
+
+def _drivetrain_info(robot: Robot) -> Optional[Dict[str, object]]:
+    """Return `robot.metadata["drivetrain"]` if it declares a recognized
+    drivetrain ("differential_drive" or "mecanum_drive"), else None if the
+    "drivetrain" key is absent entirely.
+
+    Validates the referenced wheel joints exist and are of a type
+    continuous/revolute joints can sensibly spin, and that all
+    shape-required keys are present (per the documented convention) --
+    raises ValueError with a clear message otherwise, rather than silently
+    emitting nonsense.
+
+    Raises ValueError naming the bad value if `drivetrain["type"]` is set to
+    anything other than one of the supported types -- this is NOT treated as
+    "no drivetrain" (that used to be a real, silent-fallthrough bug here:
+    an unrecognized type was indistinguishable from no drivetrain at all,
+    and the robot silently got arm-style joint_trajectory_controller
+    handling instead of a clear error).
+    """
+    drivetrain = (robot.metadata or {}).get("drivetrain")
+    if not drivetrain:
+        return None
+
+    drivetrain_type = drivetrain.get("type")
+
+    if drivetrain_type == _DIFFERENTIAL_DRIVE:
+        required_keys = _DIFF_DRIVE_REQUIRED_KEYS
+        expected = (
+            "{'type': 'differential_drive', 'left_wheel_joint': ..., "
+            "'right_wheel_joint': ..., 'wheel_separation': ..., 'wheel_radius': ...}"
+        )
+        wheel_keys = _DIFF_DRIVE_WHEEL_KEYS
+    elif drivetrain_type == _MECANUM_DRIVE:
+        required_keys = _MECANUM_REQUIRED_KEYS
+        expected = (
+            "{'type': 'mecanum_drive', 'front_left_wheel_joint': ..., "
+            "'front_right_wheel_joint': ..., 'back_left_wheel_joint': ..., "
+            "'back_right_wheel_joint': ..., 'wheel_radius': ..., "
+            "'sum_of_robot_center_projection_on_x_y_axis': ...}"
+        )
+        wheel_keys = _MECANUM_WHEEL_KEYS
+    else:
+        raise ValueError(
+            f"Robot.metadata['drivetrain']['type'] is {drivetrain_type!r}; "
+            f"ros2_control generation only supports {_SUPPORTED_DRIVETRAIN_TYPES}. "
+            "This is a hard error, not treated as 'no drivetrain', so a typo or "
+            "an as-yet-unsupported drivetrain type is never silently handled as "
+            "a plain arm/manipulator."
+        )
+
+    for key in required_keys:
+        if key not in drivetrain:
+            raise ValueError(
+                f"Robot.metadata['drivetrain'] is missing required key {key!r}. "
+                f"Expected: {expected}"
+            )
+
+    _validate_wheel_joints(robot, drivetrain, wheel_keys)
 
     return drivetrain
 
@@ -159,6 +276,8 @@ def _actuator_for_joint(robot: Robot, joint_name: str) -> Optional[Actuator]:
 def _wheel_joint_names(drivetrain: Optional[Dict[str, object]]) -> List[str]:
     if drivetrain is None:
         return []
+    if drivetrain["type"] == _MECANUM_DRIVE:
+        return [drivetrain[key] for key in _MECANUM_WHEEL_KEYS]
     return [drivetrain["left_wheel_joint"], drivetrain["right_wheel_joint"]]
 
 
@@ -187,9 +306,11 @@ def generate_ros2_control_xml(robot: Robot) -> str:
             Propagated unmodified.
         ValueError: if a non-fixed, non-wheel joint has no matching
             `Actuator`, if an `Actuator.interface` isn't one of
-            "position"/"velocity"/"effort", or if `Robot.metadata
+            "position"/"velocity"/"effort", if `Robot.metadata
             ["drivetrain"]` is malformed (missing keys, or a wheel joint
-            that doesn't exist / isn't continuous or revolute).
+            that doesn't exist / isn't continuous or revolute), or if
+            `Robot.metadata["drivetrain"]["type"]` isn't one of the
+            supported drivetrain types.
     """
     robot.validate()  # raises ValidationError on problems; let it propagate
 
@@ -243,11 +364,12 @@ def generate_ros2_control_xml(robot: Robot) -> str:
 def generate_controllers_yaml(robot: Robot) -> str:
     """Render `controller_manager`/controller YAML text for `robot`.
 
-    Always includes `joint_state_broadcaster`. Adds a
-    `joint_trajectory_controller` covering every non-fixed, non-wheel joint
-    for an arm/manipulator robot, or a `diff_drive_controller` configured
-    from `Robot.metadata["drivetrain"]` for a differential-drive robot --
-    never both.
+    Always includes `joint_state_broadcaster`. Adds exactly one of:
+    a `joint_trajectory_controller` covering every non-fixed, non-wheel
+    joint for an arm/manipulator robot; a `diff_drive_controller` configured
+    from `Robot.metadata["drivetrain"]` for a differential-drive robot; or a
+    `mecanum_drive_controller` configured from `Robot.metadata["drivetrain"]`
+    for a mecanum-drive robot.
 
     Raises the same ValueError/ValidationError conditions as
     `generate_ros2_control_xml` (it performs the same joint/actuator/
@@ -293,7 +415,7 @@ def generate_controllers_yaml(robot: Robot) -> str:
     lines.append(f"      type: {_JOINT_STATE_BROADCASTER_TYPE}")
     lines.append("")
 
-    if drivetrain is not None:
+    if drivetrain is not None and drivetrain["type"] == _DIFFERENTIAL_DRIVE:
         lines.append("    diff_drive_controller:")
         lines.append(f"      type: {_DIFF_DRIVE_CONTROLLER_TYPE}")
         lines.append("")
@@ -307,6 +429,25 @@ def generate_controllers_yaml(robot: Robot) -> str:
         lines.append(f'    right_wheel_names: ["{drivetrain["right_wheel_joint"]}"]')
         lines.append(f'    wheel_separation: {_fmt_number(drivetrain["wheel_separation"])}')
         lines.append(f'    wheel_radius: {_fmt_number(drivetrain["wheel_radius"])}')
+    elif drivetrain is not None and drivetrain["type"] == _MECANUM_DRIVE:
+        lines.append("    mecanum_drive_controller:")
+        lines.append(f"      type: {_MECANUM_DRIVE_CONTROLLER_TYPE}")
+        lines.append("")
+        lines.append("joint_state_broadcaster:")
+        lines.append("  ros__parameters:")
+        lines.append(f"    type: {_JOINT_STATE_BROADCASTER_TYPE}")
+        lines.append("")
+        lines.append("mecanum_drive_controller:")
+        lines.append("  ros__parameters:")
+        for metadata_key in _MECANUM_WHEEL_KEYS:
+            command_param = _MECANUM_KEY_TO_COMMAND_PARAM[metadata_key]
+            lines.append(f'    {command_param}: {drivetrain[metadata_key]}')
+        lines.append("    kinematics:")
+        lines.append(f'      wheels_radius: {_fmt_number(drivetrain["wheel_radius"])}')
+        lines.append(
+            "      sum_of_robot_center_projection_on_X_Y_axis: "
+            f'{_fmt_number(drivetrain["sum_of_robot_center_projection_on_x_y_axis"])}'
+        )
     else:
         lines.append("    joint_trajectory_controller:")
         lines.append(f"      type: {_JOINT_TRAJECTORY_CONTROLLER_TYPE}")
@@ -367,7 +508,12 @@ def generate_control_launch(robot: Robot) -> str:
     controller's name).
     """
     drivetrain = _drivetrain_info(robot)
-    second_controller = "diff_drive_controller" if drivetrain is not None else "joint_trajectory_controller"
+    if drivetrain is None:
+        second_controller = "joint_trajectory_controller"
+    elif drivetrain["type"] == _MECANUM_DRIVE:
+        second_controller = "mecanum_drive_controller"
+    else:
+        second_controller = "diff_drive_controller"
 
     return f'''"""Control launch file for the "{robot.name}" robot.
 
