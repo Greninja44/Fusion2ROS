@@ -11,6 +11,14 @@ from .schema import (
     Material,
 )
 from .errors import RobotModelError, ValidationError
+from .serialization import (
+    load_robot_json,
+    robot_from_dict,
+    robot_from_json,
+    robot_to_dict,
+    robot_to_json,
+    save_robot_json,
+)
 
 __all__ = [
     "Robot",
@@ -25,4 +33,10 @@ __all__ = [
     "Material",
     "RobotModelError",
     "ValidationError",
+    "robot_to_dict",
+    "robot_from_dict",
+    "robot_to_json",
+    "robot_from_json",
+    "save_robot_json",
+    "load_robot_json",
 ]
