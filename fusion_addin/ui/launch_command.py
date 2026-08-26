@@ -1,13 +1,16 @@
 """Fusion 360 command handler for "Launch RViz".
 
-*** UNVERIFIED against a live Fusion process, and against a live wsl.exe ***
--- see build_command.py's docstring for the shared caveats (WSL detection,
-controlDefinition.isEnabled greying-out). This command additionally relies
-on bridge.windows.invoke.launch_ros2_in_wsl, a new function added alongside
-this UI work specifically for this "run something after a successful build"
-need (see its docstring in bridge/windows/invoke.py for the full set of
-untested assumptions, in particular around backgrounding a GUI process
-through `wsl.exe -- bash -lc "..."`).
+*** UNVERIFIED against a live Fusion process *** -- the adsk.core side of
+this file has never run inside a real Fusion 360 session (no adsk.core in
+this sandbox), same as every other file in fusion_addin/ui/. The
+`bridge.windows.invoke.launch_ros2_in_wsl` call it makes is, however, now
+PARTIALLY real-verified: its immediate-failure-detection path (a launch
+that dies within a few seconds -- bad package/launch-file name, etc.) has
+been run for real against a genuine `wsl.exe` (see
+tests/bridge/test_windows_invoke.py and that function's own docstring for
+exactly what's confirmed vs. not -- the GUI-stays-up success path remains
+unverified, since confirming an RViz window actually renders hit the WSLg
+screenshot limitation documented elsewhere in this project).
 
 Intended flow (per the task brief): run this after "Build in WSL" has
 succeeded, so the workspace's `install/setup.bash` actually exists to
