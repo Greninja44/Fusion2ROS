@@ -234,6 +234,12 @@ def generate_ros_package(
         extra_files["worlds/empty.sdf"] = generate_world_sdf()
         extra_files["launch/gazebo.launch.py"] = generate_spawn_launch(robot)
 
+        if robot.sensors:
+            from .generators.sensors import generate_ros_gz_bridge_yaml, generate_sensor_gazebo_xml
+
+            fragments.append(generate_sensor_gazebo_xml(robot))
+            extra_files["config/ros_gz_bridge.yaml"] = generate_ros_gz_bridge_yaml(robot)
+
     if include_moveit:
         from .generators.moveit import (
             detect_moveit_suitability,

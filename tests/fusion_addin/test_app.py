@@ -241,6 +241,47 @@ def test_generate_ros_package_with_gazebo(tmp_path):
     assert "gazebo_fragment" not in urdf_text  # wrapper must be unwrapped, not leaked into the URDF
 
 
+def test_generate_ros_package_with_gazebo_and_sensors(tmp_path):
+    from robot_model import Sensor
+
+    robot = make_simple_robot(with_limits=True)
+    robot.sensors.append(Sensor(name="head_camera", type="camera", parent_link="arm"))
+    robot.sensors.append(Sensor(name="base_imu", type="imu", parent_link="base_link"))
+
+    package_dir = generate_ros_package(robot, {}, tmp_path, include_gazebo=True)
+
+    urdf_text = (package_dir / "urdf" / f"{robot.name}.urdf.xacro").read_text()
+    assert "<sensor name=\"head_camera\" type=\"camera\">" in urdf_text
+    assert "<sensor name=\"base_imu\" type=\"imu\">" in urdf_text
+    assert "gazebo_fragment" not in urdf_text  # wrapper must be unwrapped, not leaked into the URDF
+
+    import xml.etree.ElementTree as ET
+
+    ET.fromstring(urdf_text)  # must still be well-formed XML with all fragments spliced in
+
+    bridge_yaml_path = package_dir / "config" / "ros_gz_bridge.yaml"
+    assert bridge_yaml_path.exists()
+    import yaml
+
+    entries = yaml.safe_load(bridge_yaml_path.read_text())
+    ros_topics = {e["ros_topic_name"] for e in entries}
+    assert "/head_camera/image" in ros_topics
+    assert "/base_imu" in ros_topics
+
+
+def test_generate_ros_package_with_gazebo_no_sensors_skips_bridge_yaml(tmp_path):
+    # include_gazebo=True but robot.sensors is empty -> no sensor XML/bridge
+    # config generated at all (not merely empty ones) -- matches the
+    # "robot.sensors non-empty" gate in generate_ros_package's include_gazebo
+    # block.
+    robot = make_simple_robot(with_limits=True)
+    assert robot.sensors == []
+
+    package_dir = generate_ros_package(robot, {}, tmp_path, include_gazebo=True)
+
+    assert not (package_dir / "config" / "ros_gz_bridge.yaml").exists()
+
+
 def test_generate_ros_package_with_ros2_control_and_gazebo_both_splice(tmp_path):
     robot = make_simple_robot(with_limits=True)
     robot.actuators.append(Actuator(name="joint1_motor", type="electric_motor", joint="joint1", interface="position"))
