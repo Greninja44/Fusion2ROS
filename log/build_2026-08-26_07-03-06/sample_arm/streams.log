@@ -1,0 +1,55 @@
+[0.026s] Invoking command in '/home/batman/Fusion2ROS/build/sample_arm': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake /home/batman/Fusion2ROS/output/sample_arm -DCMAKE_INSTALL_PREFIX=/home/batman/Fusion2ROS/install/sample_arm
+[0.294s] -- The C compiler identification is GNU 15.2.0
+[1.554s] -- The CXX compiler identification is GNU 15.2.0
+[2.287s] -- Detecting C compiler ABI info
+[2.567s] -- Detecting C compiler ABI info - done
+[2.595s] -- Check for working C compiler: /usr/bin/cc - skipped
+[2.595s] -- Detecting C compile features
+[2.596s] -- Detecting C compile features - done
+[2.614s] -- Detecting CXX compiler ABI info
+[2.893s] -- Detecting CXX compiler ABI info - done
+[2.910s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[2.911s] -- Detecting CXX compile features
+[2.912s] -- Detecting CXX compile features - done
+[2.927s] -- Found ament_cmake: 2.8.7 (/opt/ros/lyrical/share/ament_cmake/cmake)
+[3.720s] -- Configuring done (3.7s)
+[3.726s] -- Generating done (0.0s)
+[3.728s] -- Build files have been written to: /home/batman/Fusion2ROS/build/sample_arm
+[3.746s] Invoked command in '/home/batman/Fusion2ROS/build/sample_arm' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake /home/batman/Fusion2ROS/output/sample_arm -DCMAKE_INSTALL_PREFIX=/home/batman/Fusion2ROS/install/sample_arm
+[3.747s] Invoking command in '/home/batman/Fusion2ROS/build/sample_arm': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake --build /home/batman/Fusion2ROS/build/sample_arm -- -j12 -l12
+[3.798s] Invoked command in '/home/batman/Fusion2ROS/build/sample_arm' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake --build /home/batman/Fusion2ROS/build/sample_arm -- -j12 -l12
+[3.799s] Invoking command in '/home/batman/Fusion2ROS/build/sample_arm': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake --install /home/batman/Fusion2ROS/build/sample_arm
+[3.814s] -- Install configuration: ""
+[3.814s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config
+[3.816s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/kinematics.yaml
+[3.817s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/sample_arm.srdf
+[3.818s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/moveit_controllers.yaml
+[3.818s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/controllers.yaml
+[3.818s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/ompl_planning.yaml
+[3.818s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/joint_limits.yaml
+[3.818s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/launch
+[3.819s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/launch/control.launch.py
+[3.819s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/launch/moveit_demo.launch.py
+[3.819s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/launch/display.launch.py
+[3.819s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/meshes
+[3.819s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/rviz
+[3.820s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/rviz/sample_arm.rviz
+[3.820s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/urdf
+[3.820s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/urdf/sample_arm.urdf.xacro
+[3.821s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/ament_index/resource_index/package_run_dependencies/sample_arm
+[3.822s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/ament_index/resource_index/parent_prefix_path/sample_arm
+[3.822s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/environment/ament_prefix_path.sh
+[3.822s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/environment/ament_prefix_path.dsv
+[3.823s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/environment/path.sh
+[3.823s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/environment/path.dsv
+[3.823s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/local_setup.bash
+[3.823s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/local_setup.fish
+[3.823s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/local_setup.sh
+[3.824s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/local_setup.zsh
+[3.824s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/local_setup.dsv
+[3.824s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/package.dsv
+[3.824s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/ament_index/resource_index/packages/sample_arm
+[3.824s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/cmake/sample_armConfig.cmake
+[3.824s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/cmake/sample_armConfig-version.cmake
+[3.825s] -- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/package.xml
+[3.830s] Invoked command in '/home/batman/Fusion2ROS/build/sample_arm' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake --install /home/batman/Fusion2ROS/build/sample_arm

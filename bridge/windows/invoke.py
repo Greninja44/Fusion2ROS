@@ -66,8 +66,9 @@ import posixpath
 import shlex
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 DEFAULT_DISTRO = "Ubuntu-26.04"
 DEFAULT_ROS_SETUP = "/opt/ros/lyrical/setup.bash"
@@ -123,6 +124,7 @@ def run_in_wsl(
     command: str,
     distro: str = DEFAULT_DISTRO,
     timeout: float = 300.0,
+    on_output_line: Optional[Callable[[str], None]] = None,
 ) -> WslResult:
     """Run `command` inside WSL as `bash -lc "<command>"`, via wsl.exe.
 
@@ -134,28 +136,96 @@ def run_in_wsl(
     outcome. Callers should check `is_wsl_available()` (detect.py) before
     relying on this in a UI flow, but this function itself stays defensive
     regardless.
+
+    on_output_line (default None, opt-in): if given, called once per line
+    of stdout/stderr AS THE REMOTE COMMAND RUNS -- a `colcon build` relayed
+    through `wsl.exe` can take real wall-clock time, and without this a
+    caller (the Fusion "Build in WSL" command in particular) has nothing to
+    show but a frozen-looking dialog until the whole thing completes.
+    Mirrors bridge.wsl_side.build.colcon_build's identically-named
+    parameter and the same threaded-Popen implementation strategy (real-
+    tested there and, now, here too -- see
+    tests/bridge/test_windows_invoke.py). The DEFAULT (no callback) path is
+    untouched and still uses subprocess.run(), so existing callers see zero
+    behavior change. Each line is decoded as UTF-8 (errors="replace") for
+    the callback specifically -- the module-level `_decode` heuristic
+    (UTF-16LE vs UTF-8) still runs on the FULLY ACCUMULATED bytes for the
+    final WslResult.stdout/stderr, exactly as the non-streaming path
+    always has; per-line decoding is deliberately simpler since splitting
+    a UTF-16LE byte stream on arbitrary read boundaries cannot be done
+    safely without risking corrupting multi-byte sequences.
     """
     wsl_path = shutil.which("wsl.exe")
     if wsl_path is None:
         return WslResult(success=False, stdout="", stderr="wsl.exe not found on PATH", returncode=-1)
 
     argv = [wsl_path, "-d", distro, "--", "bash", "-lc", command]
-    try:
-        proc = subprocess.run(argv, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
+
+    if on_output_line is None:
+        try:
+            proc = subprocess.run(argv, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return WslResult(
+                success=False,
+                stdout="",
+                stderr=f"wsl.exe command timed out after {timeout}s",
+                returncode=-1,
+            )
+        except OSError as exc:
+            return WslResult(success=False, stdout="", stderr=f"failed to launch wsl.exe: {exc}", returncode=-1)
+
         return WslResult(
-            success=False,
-            stdout="",
-            stderr=f"wsl.exe command timed out after {timeout}s",
-            returncode=-1,
+            success=(proc.returncode == 0),
+            stdout=_decode(proc.stdout),
+            stderr=_decode(proc.stderr),
+            returncode=proc.returncode,
         )
+
+    try:
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as exc:
         return WslResult(success=False, stdout="", stderr=f"failed to launch wsl.exe: {exc}", returncode=-1)
 
+    stdout_chunks: list = []
+    stderr_chunks: list = []
+
+    def _pump(stream, sink: list) -> None:
+        for raw_line in iter(stream.readline, b""):
+            sink.append(raw_line)
+            on_output_line(raw_line.decode("utf-8", errors="replace").rstrip("\n"))
+        stream.close()
+
+    stdout_thread = threading.Thread(target=_pump, args=(proc.stdout, stdout_chunks), daemon=True)
+    stderr_thread = threading.Thread(target=_pump, args=(proc.stderr, stderr_chunks), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        proc.wait()
+
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+
+    raw_stdout = b"".join(stdout_chunks)
+    raw_stderr = b"".join(stderr_chunks)
+
+    if timed_out:
+        return WslResult(
+            success=False,
+            stdout=_decode(raw_stdout),
+            stderr=_decode(raw_stderr) + f"\nwsl.exe command timed out after {timeout}s",
+            returncode=-1,
+        )
+
     return WslResult(
         success=(proc.returncode == 0),
-        stdout=_decode(proc.stdout),
-        stderr=_decode(proc.stderr),
+        stdout=_decode(raw_stdout),
+        stderr=_decode(raw_stderr),
         returncode=proc.returncode,
     )
 
@@ -192,6 +262,7 @@ def build_package_in_wsl(
     ros_setup: str = DEFAULT_ROS_SETUP,
     package_name: Optional[str] = None,
     timeout: float = 300.0,
+    on_output_line: Optional[Callable[[str], None]] = None,
 ) -> WslResult:
     """Copy a generated package into a WSL colcon workspace and build it.
 
@@ -226,6 +297,11 @@ def build_package_in_wsl(
     NOT yet confirmed: running this under an actual Windows Python process
     inside a real Fusion 360 add-in, as opposed to wsl.exe reached via
     WSL-side interop (see this module's docstring).
+
+    on_output_line (default None, opt-in): forwarded to the BUILD step's
+    `run_in_wsl` call only (the copy step is a plain `cp`, fast enough that
+    streaming it adds nothing) -- see `run_in_wsl`'s own docstring for the
+    real-tested threaded-Popen mechanism this activates.
     """
     trimmed = windows_package_path.rstrip("/\\")
     inferred_name = trimmed.replace("/", "\\").split("\\")[-1]
@@ -257,7 +333,7 @@ def build_package_in_wsl(
         f"cd {shlex.quote(ws_root)} && "
         f"colcon build --packages-select {shlex.quote(name)}"
     )
-    return run_in_wsl(build_command, distro=distro, timeout=timeout)
+    return run_in_wsl(build_command, distro=distro, timeout=timeout, on_output_line=on_output_line)
 
 
 def launch_ros2_in_wsl(

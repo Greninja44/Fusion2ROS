@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/batman/Fusion2ROS/build/sample_rover/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -127,12 +127,34 @@ class BuildCommandExecuteHandler(adsk.core.CommandEventHandler):
                 ui.messageBox("Fusion2ROS: package path must not be empty.")
                 return
 
-            result = build_package_in_wsl(
-                windows_package_path,
-                wsl_ros_ws_src,
-                distro=DEFAULT_DISTRO,
-                ros_setup=DEFAULT_ROS_SETUP,
-            )
+            # bridge.windows.invoke.build_package_in_wsl's on_output_line
+            # parameter is now REAL-VERIFIED (see
+            # tests/bridge/test_windows_invoke.py) -- a colcon build relayed
+            # through wsl.exe takes real wall-clock time, so this shows live
+            # build output in a progress dialog instead of a frozen-looking
+            # command while it runs. Same ProgressDialog API confirmed and
+            # used by command.py's GenerateCommandExecuteHandler.
+            progress_dialog = ui.createProgressDialog()
+            progress_dialog.isCancelButtonShown = False  # colcon build isn't cooperatively cancellable mid-flight
+            progress_dialog.show("Build in WSL", "Starting build...", 0, 0, 0)
+
+            def _on_output_line(line: str) -> None:
+                # maximumValue stays 0 (an indeterminate/marquee-style bar,
+                # per ProgressDialog.htm) since colcon gives no total-step
+                # count to report against -- the live message text is the
+                # actual feedback here, not the bar's fill level.
+                progress_dialog.message = line[-200:] if line else progress_dialog.message
+
+            try:
+                result = build_package_in_wsl(
+                    windows_package_path,
+                    wsl_ros_ws_src,
+                    distro=DEFAULT_DISTRO,
+                    ros_setup=DEFAULT_ROS_SETUP,
+                    on_output_line=_on_output_line,
+                )
+            finally:
+                progress_dialog.hide()
 
             if result.success:
                 state.set_last_wsl_ros_ws_src(wsl_ros_ws_src)

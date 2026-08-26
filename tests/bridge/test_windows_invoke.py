@@ -113,6 +113,65 @@ def test_build_package_in_wsl_end_to_end(tmp_path):
 
 
 @requires_wsl_exe
+def test_run_in_wsl_streams_output_line_by_line():
+    lines = []
+    result = run_in_wsl(
+        "echo one && echo two && echo three", timeout=15, on_output_line=lines.append
+    )
+
+    assert result.success is True
+    assert len(lines) >= 3
+    assert "one" in lines
+    assert "two" in lines
+    assert "three" in lines
+    # Streamed lines must agree with the final captured (and _decode()'d)
+    # stdout -- streaming must not lose or corrupt anything relative to
+    # what the non-streaming subprocess.run() path would have captured.
+    for line in lines:
+        assert line in result.stdout
+
+
+@requires_wsl_exe
+def test_run_in_wsl_streaming_reports_nonzero_exit():
+    lines = []
+    result = run_in_wsl("echo about_to_fail && exit 3", timeout=15, on_output_line=lines.append)
+
+    assert result.success is False
+    assert result.returncode == 3
+    assert "about_to_fail" in lines
+
+
+@requires_wsl_and_ros
+def test_build_package_in_wsl_streams_real_colcon_output(tmp_path):
+    # Same real end-to-end build as test_build_package_in_wsl_end_to_end,
+    # but this time proving on_output_line actually receives real colcon
+    # output while the remote build runs, all the way through the
+    # wsl.exe-composed copy+build chain.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from examples.sample_rover import build_sample_rover
+    from fusion_addin.app import generate_ros_package
+
+    robot = build_sample_rover()
+    package_dir = generate_ros_package(robot, {}, tmp_path / "generated")
+    windows_style_path = r"\\wsl.localhost\Ubuntu-26.04" + str(package_dir).replace("/", "\\")
+
+    throwaway_ws_src = f"/tmp/{tmp_path.name}_bridge_stream_ws/src"
+    lines = []
+    try:
+        result = build_package_in_wsl(
+            windows_style_path, throwaway_ws_src, timeout=120, on_output_line=lines.append
+        )
+
+        assert result.success is True, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert len(lines) > 0
+        combined = result.stdout + result.stderr
+        for line in lines:
+            assert line in combined
+    finally:
+        shutil.rmtree(f"/tmp/{tmp_path.name}_bridge_stream_ws", ignore_errors=True)
+
+
+@requires_wsl_exe
 def test_launch_ros2_in_wsl_detects_immediate_failure(tmp_path):
     # Real, end-to-end verification of the "did the launch die immediately"
     # detection mechanism -- deliberately launches a nonexistent launch
