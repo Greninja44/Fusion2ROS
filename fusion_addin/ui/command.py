@@ -33,6 +33,7 @@ import json
 import tempfile
 import traceback
 from pathlib import Path
+from typing import Dict, Optional
 
 import adsk.core
 import adsk.fusion
@@ -87,6 +88,30 @@ PALETTE_ID = "fusion2ros_detected_summary_palette"
 # "file:///C:/Users/.../detected_summary.html" URI regardless of OS
 # separator, which is what's actually required here.
 PALETTE_HTML_PATH = (Path(__file__).parent / "resources" / "palette" / "detected_summary.html").as_uri()
+
+# Drivetrain dropdown item labels -- see the "drivetrain_type" input's own
+# comment in GenerateCommandCreatedHandler for why this exists.
+_DRIVETRAIN_NONE = "None (arm/manipulator)"
+_DRIVETRAIN_DIFFERENTIAL = "Differential Drive"
+_DRIVETRAIN_MECANUM = "Mecanum Drive"
+
+# Input IDs shown only for their respective drivetrain_type selection --
+# shared between _set_drivetrain_inputs_visibility and
+# _build_drivetrain_metadata so the two can't drift out of sync.
+_DIFFERENTIAL_INPUT_IDS = (
+    "drivetrain_left_wheel_joint",
+    "drivetrain_right_wheel_joint",
+    "drivetrain_wheel_separation_m",
+    "drivetrain_wheel_radius_m",
+)
+_MECANUM_INPUT_IDS = (
+    "drivetrain_fl_wheel_joint",
+    "drivetrain_fr_wheel_joint",
+    "drivetrain_bl_wheel_joint",
+    "drivetrain_br_wheel_joint",
+    "drivetrain_mecanum_wheel_radius_m",
+    "drivetrain_mecanum_center_sum_m",
+)
 
 _handlers = []  # Fusion requires handlers to be kept alive; module-level list per standard pattern.
 
@@ -231,6 +256,84 @@ def _selected_root_component(inputs: "adsk.core.CommandInputs"):
     return occurrence.component if occurrence else None
 
 
+def _set_drivetrain_inputs_visibility(inputs: "adsk.core.CommandInputs") -> None:
+    """Shows only the wheel-joint/numeric inputs relevant to the currently
+    selected "drivetrain_type" dropdown value, hiding the rest. Called once
+    at command creation (for the default "None" selection) and again from
+    GenerateInputChangedHandler whenever the user changes the dropdown.
+    CommandInput.isVisible is a plain read/write property, the standard way
+    to show/hide an input without destroying/recreating it.
+    """
+    selected = inputs.itemById("drivetrain_type").selectedItem.name
+    for input_id in _DIFFERENTIAL_INPUT_IDS:
+        inputs.itemById(input_id).isVisible = selected == _DRIVETRAIN_DIFFERENTIAL
+    for input_id in _MECANUM_INPUT_IDS:
+        inputs.itemById(input_id).isVisible = selected == _DRIVETRAIN_MECANUM
+
+
+def _parse_positive_float(inputs: "adsk.core.CommandInputs", input_id: str, field_label: str) -> float:
+    raw = inputs.itemById(input_id).value.strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{field_label} must be a number (got {raw!r}).") from None
+    if value <= 0:
+        raise ValueError(f"{field_label} must be a positive number (got {value}).")
+    return value
+
+
+def _build_drivetrain_metadata(inputs: "adsk.core.CommandInputs") -> Optional[Dict[str, object]]:
+    """Reads the drivetrain_* inputs and returns the robot.metadata["drivetrain"]
+    dict app.py/ros2_control.py/nav2.py expect (see ros2_control.py's module
+    docstring for the exact shape), or None if "None (arm/manipulator)" is
+    selected. Raises ValueError with a clear, field-specific message on
+    bad/missing input -- caught by GenerateCommandExecuteHandler the same
+    way any other input-validation error is.
+    """
+    selected = inputs.itemById("drivetrain_type").selectedItem.name
+
+    if selected == _DRIVETRAIN_NONE:
+        return None
+
+    if selected == _DRIVETRAIN_DIFFERENTIAL:
+        left = inputs.itemById("drivetrain_left_wheel_joint").value.strip()
+        right = inputs.itemById("drivetrain_right_wheel_joint").value.strip()
+        if not left or not right:
+            raise ValueError("Differential Drive requires both a left and right wheel joint name.")
+        return {
+            "type": "differential_drive",
+            "left_wheel_joint": left,
+            "right_wheel_joint": right,
+            "wheel_separation": _parse_positive_float(
+                inputs, "drivetrain_wheel_separation_m", "Wheel separation (m)"
+            ),
+            "wheel_radius": _parse_positive_float(inputs, "drivetrain_wheel_radius_m", "Wheel radius (m)"),
+        }
+
+    if selected == _DRIVETRAIN_MECANUM:
+        joint_fields = {
+            "front_left_wheel_joint": "drivetrain_fl_wheel_joint",
+            "front_right_wheel_joint": "drivetrain_fr_wheel_joint",
+            "back_left_wheel_joint": "drivetrain_bl_wheel_joint",
+            "back_right_wheel_joint": "drivetrain_br_wheel_joint",
+        }
+        drivetrain: Dict[str, object] = {"type": "mecanum_drive"}
+        for key, input_id in joint_fields.items():
+            value = inputs.itemById(input_id).value.strip()
+            if not value:
+                raise ValueError(f"Mecanum Drive requires a joint name for {key.replace('_', ' ')}.")
+            drivetrain[key] = value
+        drivetrain["wheel_radius"] = _parse_positive_float(
+            inputs, "drivetrain_mecanum_wheel_radius_m", "Wheel radius (m)"
+        )
+        drivetrain["sum_of_robot_center_projection_on_x_y_axis"] = _parse_positive_float(
+            inputs, "drivetrain_mecanum_center_sum_m", "Sum of robot-center projection on X/Y axis (m)"
+        )
+        return drivetrain
+
+    raise ValueError(f"Unrecognized drivetrain selection {selected!r}.")
+
+
 def _refresh_detected_summary(inputs: "adsk.core.CommandInputs") -> None:
     """Rebuilds the read-only "Detected Links/Joints" text box by actually
     running extraction (FusionDesignReaderAdapter -> app.build_robot_from_reader)
@@ -319,6 +422,53 @@ class GenerateCommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             inputs.addBoolValueInput("include_nav2", "Nav2", True, "", False)
             inputs.addStringValueInput("moveit_group_name", "MoveIt planning group (if MoveIt 2 checked)", "arm")
 
+            # REAL GAP FOUND AND FIXED HERE: robot.metadata["drivetrain"] --
+            # the convention ros2_control.py/nav2.py use to recognize a
+            # differential-drive or mecanum-drive mobile base (see
+            # ros2_control.py's module docstring for the exact shape) -- was
+            # previously only ever set by hand in example scripts
+            # (examples/sample_rover.py). A real wheeled robot built through
+            # this add-in had NO way to enable Nav2/ros2_control's
+            # drivetrain-specific controllers at all; "Nav2" would always
+            # fail with "robot.metadata['drivetrain'] is not set" even when
+            # the design's wheel joints were correctly detected. See
+            # _build_drivetrain_metadata / _set_drivetrain_inputs_visibility
+            # below for how these inputs are read and shown/hidden.
+            #
+            # DropDownStyles.TextListDropDownStyle and ListItems.add's
+            # signature confirmed via DropDownStyles.htm / ListItems_add.htm.
+            drivetrain_input = inputs.addDropDownCommandInput(
+                "drivetrain_type",
+                "Drivetrain (for Nav2 / ros2_control)",
+                adsk.core.DropDownStyles.TextListDropDownStyle,
+            )
+            drivetrain_input.listItems.add(_DRIVETRAIN_NONE, True)
+            drivetrain_input.listItems.add(_DRIVETRAIN_DIFFERENTIAL, False)
+            drivetrain_input.listItems.add(_DRIVETRAIN_MECANUM, False)
+
+            # Plain string inputs (type the exact joint name shown in
+            # "Detected Links/Joints" below) rather than a dropdown of
+            # detected joints -- consistent with every other free-text input
+            # in this file, and avoids needing to rebuild a live-populated
+            # dropdown's list items every time root_occurrence changes.
+            inputs.addStringValueInput("drivetrain_left_wheel_joint", "Left wheel joint name", "")
+            inputs.addStringValueInput("drivetrain_right_wheel_joint", "Right wheel joint name", "")
+            inputs.addStringValueInput("drivetrain_wheel_separation_m", "Wheel separation (m)", "")
+            inputs.addStringValueInput("drivetrain_wheel_radius_m", "Wheel radius (m)", "")
+
+            inputs.addStringValueInput("drivetrain_fl_wheel_joint", "Front-left wheel joint name", "")
+            inputs.addStringValueInput("drivetrain_fr_wheel_joint", "Front-right wheel joint name", "")
+            inputs.addStringValueInput("drivetrain_bl_wheel_joint", "Back-left wheel joint name", "")
+            inputs.addStringValueInput("drivetrain_br_wheel_joint", "Back-right wheel joint name", "")
+            inputs.addStringValueInput("drivetrain_mecanum_wheel_radius_m", "Wheel radius (m)", "")
+            inputs.addStringValueInput(
+                "drivetrain_mecanum_center_sum_m",
+                "Sum of robot-center projection on X/Y axis (m)",
+                "",
+            )
+
+            _set_drivetrain_inputs_visibility(inputs)
+
             # Detected Links/Joints readback (task item 3). addTextBoxCommandInput
             # signature confirmed via help.autodesk.com (id, name,
             # formattedText, numRows, isReadOnly) -- Autodesk's docs flag this
@@ -389,18 +539,22 @@ class GenerateInputChangedHandler(adsk.core.InputChangedEventHandler):
     one and `args.inputs` giving the full CommandInputs collection to react
     against -- exactly what `_refresh_detected_summary` needs.
 
-    Reacts ONLY to "root_occurrence" -- not "robot_name". A robot's name has
-    zero effect on which links/joints extraction finds (converter.py only
-    ever uses it as the resulting Robot's .name label); re-running full
-    extraction against a live Fusion design on every single keystroke while
-    typing a name would make this dialog feel sluggish on anything but a
-    tiny assembly, for a readback that wouldn't even change. Only a
-    root-occurrence change actually re-scopes what gets extracted.
+    Reacts to "root_occurrence" (re-run extraction -- a root-occurrence
+    change actually re-scopes what gets extracted) and to "drivetrain_type"
+    (show/hide the relevant wheel-joint/numeric inputs). NOT to "robot_name"
+    or any drivetrain_* text field: a robot's name has zero effect on which
+    links/joints extraction finds (converter.py only ever uses it as the
+    resulting Robot's .name label), and re-running full extraction against a
+    live Fusion design on every single keystroke while typing a name (or a
+    wheel joint name / wheel radius) would make this dialog feel sluggish on
+    anything but a tiny assembly, for a readback that wouldn't even change.
     """
 
     def notify(self, args: "adsk.core.InputChangedEventArgs") -> None:
         if args.input.id == "root_occurrence":
             _refresh_detected_summary(args.inputs)
+        elif args.input.id == "drivetrain_type":
+            _set_drivetrain_inputs_visibility(args.inputs)
 
 
 class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
@@ -445,9 +599,21 @@ class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
                 ui.messageBox("Fusion2ROS: robot name must not be empty.")
                 return
 
+            try:
+                drivetrain = _build_drivetrain_metadata(inputs)
+            except ValueError as exc:
+                ui.messageBox(f"Fusion2ROS: {exc}")
+                return
+
             root_component = _selected_root_component(inputs)
             reader = FusionDesignReaderAdapter(design, root_component=root_component)
             robot = app.build_robot_from_reader(reader, robot_name)
+            if drivetrain is not None:
+                # robot.metadata is a plain mutable dict even though Robot
+                # itself is a frozen dataclass -- see
+                # _build_drivetrain_metadata's docstring for why this exists
+                # and ros2_control.py's module docstring for the shape.
+                robot.metadata["drivetrain"] = drivetrain
 
             def _on_progress(stage_description: str, step: int, total_steps: int) -> None:
                 if progress_dialog.maximumValue != total_steps:
