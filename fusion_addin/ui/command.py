@@ -378,10 +378,19 @@ class GenerateInputChangedHandler(adsk.core.InputChangedEventHandler):
     """Confirmed via Command_inputChanged.htm / InputChangedEventArgs.htm:
     fires whenever any command input changes, with `args.input` naming which
     one and `args.inputs` giving the full CommandInputs collection to react
-    against -- exactly what `_refresh_detected_summary` needs."""
+    against -- exactly what `_refresh_detected_summary` needs.
+
+    Reacts ONLY to "root_occurrence" -- not "robot_name". A robot's name has
+    zero effect on which links/joints extraction finds (converter.py only
+    ever uses it as the resulting Robot's .name label); re-running full
+    extraction against a live Fusion design on every single keystroke while
+    typing a name would make this dialog feel sluggish on anything but a
+    tiny assembly, for a readback that wouldn't even change. Only a
+    root-occurrence change actually re-scopes what gets extracted.
+    """
 
     def notify(self, args: "adsk.core.InputChangedEventArgs") -> None:
-        if args.input.id in ("robot_name", "root_occurrence"):
+        if args.input.id == "root_occurrence":
             _refresh_detected_summary(args.inputs)
 
 

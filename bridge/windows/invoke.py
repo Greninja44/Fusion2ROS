@@ -1,11 +1,28 @@
 """Run commands inside WSL from Windows Python (the Fusion 360 add-in
 process), and compose the copy+build steps of the bridge workflow.
 
-*** UNVERIFIED -- see bridge/windows/__init__.py ***
-Written against documented `wsl.exe` command-line behavior only. Never run
-against a real `wsl.exe`, a real Windows Python process, or a real Fusion
-360 session. Specific ASSUMPTIONS made here, to be the first things checked
-if this misbehaves on a real machine:
+*** PARTIALLY VERIFIED, for real -- see tests/bridge/test_windows_invoke.py ***
+This module was long assumed untestable from WSL (it's meant to run under
+WINDOWS Python inside Fusion) -- wrong: `wsl.exe` itself is reachable via
+genuine Windows/WSL interop from *inside* WSL too (confirmed live on this
+machine: real `wsl.exe` at /mnt/c/WINDOWS/system32/wsl.exe, invoked exactly
+as this module does). `run_in_wsl`, `_windows_path_to_wsl_path` (UNC-path
+branch), and `build_package_in_wsl` have each been run for real end-to-end
+this way and work correctly, including a genuine `colcon build` of a real
+generated package through the full copy+build composition.
+`launch_ros2_in_wsl`'s failure-detection path (launch dies within
+`settle_seconds`, error relayed correctly) is likewise real-verified; its
+success path (a GUI launch that stays up) is not, since confirming an RViz
+window actually rendered hit the same WSLg screenshot limitation documented
+elsewhere in this project.
+
+Still NOT verified: running this code under an actual Windows Python
+process inside a real Fusion 360 add-in (as opposed to wsl.exe reached via
+WSL-side interop, which is what the tests above actually exercise) -- see
+bridge/windows/__init__.py. The `wslpath -u` native-path-translation branch
+of `_windows_path_to_wsl_path` is also still unverified (only the UNC-path
+branch was exercised above). Remaining specific ASSUMPTIONS, to be the
+first things checked if something still misbehaves on a real machine:
 
   * `wsl.exe -d <distro> -- bash -lc "<command>"` is a valid, supported
     invocation form that runs `<command>` in a login shell inside the named
@@ -33,10 +50,14 @@ if this misbehaves on a real machine:
   * A Windows-side path such as `\\\\wsl.localhost\\<distro>\\home\\...` is
     assumed to map directly to the WSL-native path by stripping the UNC
     prefix (this is how Windows exposes a WSL distro's own filesystem back
-    to Windows -- see docs/ARCHITECTURE.md "Windows/WSL wiring"). A genuine
-    Windows-native path (e.g. `C:\\Users\\...\\output\\my_robot`) is instead
-    translated with `wslpath -u`, run inside the target distro. This
-    UNC-vs-native branch has not been tested against a real `wsl.exe`.
+    to Windows -- see docs/ARCHITECTURE.md "Windows/WSL wiring"). CONFIRMED
+    for real (see tests/bridge/test_windows_invoke.py's
+    test_windows_path_to_wsl_path_translates_unc_path, which round-trips
+    through a real file). A genuine Windows-native path (e.g.
+    `C:\\Users\\...\\output\\my_robot`) is instead translated with
+    `wslpath -u`, run inside the target distro -- that branch is still
+    untested (this WSL-side test environment has no reason to construct a
+    genuine `C:\\...` path).
 """
 
 from __future__ import annotations
@@ -198,10 +219,13 @@ def build_package_in_wsl(
     result is returned. This is the value a Fusion UI panel should render
     as BUILD SUCCESS (`result.success`) / BUILD FAILED + `result.stderr`.
 
-    THIS COMPOSITION HAS NOT BEEN RUN END TO END. It is a thin,
-    best-effort chaining of already-unverified pieces (path translation,
-    run_in_wsl) -- treat it as a draft to validate on a real Windows +
-    WSL + Fusion 360 machine, not as tested behavior.
+    CONFIRMED end to end for real (see tests/bridge/test_windows_invoke.py's
+    test_build_package_in_wsl_end_to_end): a genuine generated package,
+    expressed as a UNC Windows-style path, copied into a throwaway
+    workspace and built with a real `colcon build` -- success. What's
+    NOT yet confirmed: running this under an actual Windows Python process
+    inside a real Fusion 360 add-in, as opposed to wsl.exe reached via
+    WSL-side interop (see this module's docstring).
     """
     trimmed = windows_package_path.rstrip("/\\")
     inferred_name = trimmed.replace("/", "\\").split("\\")[-1]
@@ -269,12 +293,16 @@ def launch_ros2_in_wsl(
     stdout/stderr, on failure, is whatever the process printed in that
     window, redirected to a temp log file and cat'd back.
 
-    THIS HAS NOT BEEN RUN END TO END -- same "unverified, best-effort draft"
-    status as build_package_in_wsl (see this module's docstring), plus one
-    extra untested assumption of its own: that `$!` (the backgrounded PID)
-    survives correctly through this exact `bash -lc "... & disown; ..."`
-    chain when invoked non-interactively via `wsl.exe`. Treat the
-    settle-and-poll result as a hint, not a guarantee, until checked live.
+    The failure-detection path (launch dies within settle_seconds, error
+    relayed) is CONFIRMED for real (see tests/bridge/test_windows_invoke.py's
+    test_launch_ros2_in_wsl_detects_immediate_failure) -- including that
+    `$!` (the backgrounded PID) does correctly survive this exact
+    `bash -lc "... & disown; ..."` chain when invoked non-interactively via
+    `wsl.exe`. NOT confirmed: the success path for a GUI launch that stays
+    up (e.g. RViz) -- this project hit the same WSLg screenshot limitation
+    documented elsewhere trying to confirm a GUI window actually renders,
+    so "still running after settle_seconds" is real-verified as a
+    mechanism, but "and the GUI actually appeared" is not.
     """
     ws_src = wsl_ros_ws_src.rstrip("/")
     ws_root = posixpath.dirname(ws_src) if posixpath.basename(ws_src) == "src" else ws_src

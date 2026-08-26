@@ -1,6 +1,7 @@
-"""Tests for bridge.wsl_side (build.py). Covers ONLY the WSL-side half of
-the bridge -- bridge.windows is untestable from inside WSL (see its module
-docstrings) and deliberately has no tests here.
+"""Tests for bridge.wsl_side (build.py). Covers the WSL-side half of the
+bridge -- see tests/bridge/test_windows_invoke.py for the Windows-side half
+(bridge.windows), which -- despite what this file used to claim -- turns
+out to be genuinely testable from inside WSL too, via real wsl.exe interop.
 
 Must run with plain `python3 -m pytest` like the rest of tests/. The
 colcon_build integration tests are real (no mocking): they build a genuine
