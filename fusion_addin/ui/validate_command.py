@@ -35,6 +35,9 @@ CMD_ID = "fusion2ros_validate"
 CMD_NAME = "Validate ROS 2 Package"
 CMD_DESCRIPTION = "Validate a generated ROS 2 package's structure and URDF against ros2_tools.validate."
 PANEL_ID = "SolidCreatePanel"
+# See command.py's RESOURCE_FOLDER comment for the confirmed
+# addButtonDefinition/resourceFolder icon-naming convention this relies on.
+RESOURCE_FOLDER = str(Path(__file__).parent / "resources" / "validate")
 
 _handlers = []
 
@@ -44,7 +47,7 @@ def register(ui: "adsk.core.UserInterface") -> None:
     if existing:
         existing.deleteMe()
 
-    cmd_def = ui.commandDefinitions.addButtonDefinition(CMD_ID, CMD_NAME, CMD_DESCRIPTION)
+    cmd_def = ui.commandDefinitions.addButtonDefinition(CMD_ID, CMD_NAME, CMD_DESCRIPTION, RESOURCE_FOLDER)
     on_created = ValidateCommandCreatedHandler()
     cmd_def.commandCreated.add(on_created)
     _handlers.append(on_created)

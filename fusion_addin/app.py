@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 ProgressCallback = Callable[[str, int, int], None]
+CancelCheck = Callable[[], bool]
 
 from robot_model import Robot, JointType
 
@@ -29,6 +30,15 @@ class PipelineError(Exception):
     """Raised for a clear, actionable, pre-generation problem (e.g. a joint
     missing the motor limits URDF requires) -- distinct from a bug, this is
     expected user-facing input the caller should display, not a traceback."""
+
+
+class GenerationCancelled(Exception):
+    """Raised by generate_ros_package when `should_cancel()` returns True at
+    one of its `_report()` checkpoints (see that parameter's docstring).
+    Deliberately NOT a PipelineError: a PipelineError means "your input is
+    wrong, fix it and try again"; this means "you asked to stop, and we did"
+    -- a caller (ui/command.py's ProgressDialog integration) should treat it
+    as a clean, silent abort, not show a traceback or an error dialog."""
 
 
 def build_robot_from_reader(reader: FusionDesignReader, robot_name: str) -> Robot:
@@ -175,6 +185,39 @@ def format_robot_summary(robot: Robot) -> str:
     return "\n".join(lines)
 
 
+def robot_summary_as_dict(robot: Robot) -> dict:
+    """Structured (not pre-formatted) equivalent of format_robot_summary,
+    same underlying information, for UI surfaces that can render a real tree
+    instead of a plain-text box -- specifically the Palette-based "Detected
+    Links/Joints" view in ui/command.py (see that module's
+    detected_summary.html), which renders this straight to HTML/JS via JSON
+    over Palette.sendInfoToHTML. Kept as a separate function rather than
+    having format_robot_summary build on it (or vice versa) so the existing
+    plain-text CLI/log path (format_robot_summary) is untouched byte-for-byte.
+
+    Fusion-symbol-free, pure formatting of an already-built Robot -- unit
+    tested directly with a hand-built Robot fixture, same as
+    format_robot_summary.
+
+    Shape:
+        {
+            "links": [{"name": str, "parent": str | None, "is_root": bool}, ...],
+            "joints": [{"name": str, "type": str, "parent": str, "child": str}, ...],
+        }
+    `type` is the joint's JointType.value string (e.g. "revolute"), matching
+    format_robot_summary's `[{joint.type.value}]` rendering.
+    """
+    return {
+        "links": [
+            {"name": link.name, "parent": link.parent, "is_root": link.parent is None} for link in robot.links
+        ],
+        "joints": [
+            {"name": joint.name, "type": joint.type.value, "parent": joint.parent, "child": joint.child}
+            for joint in robot.joints
+        ],
+    }
+
+
 def generate_ros_package(
     robot: Robot,
     mesh_files: Dict[str, Path],
@@ -186,6 +229,7 @@ def generate_ros_package(
     moveit_group_name: str = "arm",
     use_bounding_box_collision: bool = False,
     progress_callback: Optional[ProgressCallback] = None,
+    should_cancel: Optional[CancelCheck] = None,
 ) -> Path:
     """robot -> URDF/Xacro text -> full ROS 2 package tree under
     output_dir/<robot.name>/. Raises PipelineError (not a bare ValueError)
@@ -216,6 +260,18 @@ def generate_ros_package(
     Never called with a partially-failed stage -- if a stage raises, this
     function raises too, mid-callback-sequence, exactly where the error
     actually occurred.
+
+    should_cancel (default None, opt-in): if given, called with no arguments
+    at every stage checkpoint (right after progress_callback, before that
+    stage's work begins) -- if it returns truthy, generation stops
+    immediately by raising GenerationCancelled instead of proceeding.
+    Cooperative, not preemptive: this only checks between stages (URDF
+    generation, one generator's config, writing to disk), never mid-stage,
+    since none of those individual steps are themselves interruptible. Exists
+    so the Fusion UI can wire a real ProgressDialog's `wasCancelled` into
+    an actual, working cancel -- passing this without also passing
+    progress_callback is legal but pointless, since there'd be no UI moment
+    for a user to have clicked cancel from.
     """
     total_steps = 3  # validate+mesh, URDF, write-to-disk -- always present
     if include_ros2_control:
@@ -236,6 +292,10 @@ def generate_ros_package(
         step += 1
         if progress_callback is not None:
             progress_callback(stage_description, step, total_steps)
+        if should_cancel is not None and should_cancel():
+            raise GenerationCancelled(
+                f"Generation cancelled before stage {step}/{total_steps} ({stage_description!r})"
+            )
 
     _report("Checking actuator limits and attaching mesh/collision geometry")
     problems = check_missing_actuator_limits(robot)

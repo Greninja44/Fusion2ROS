@@ -40,6 +40,9 @@ CMD_ID = "fusion2ros_build_wsl"
 CMD_NAME = "Build in WSL"
 CMD_DESCRIPTION = "Copy a generated ROS 2 package into the WSL colcon workspace and build it."
 PANEL_ID = "SolidCreatePanel"
+# See command.py's RESOURCE_FOLDER comment for the confirmed
+# addButtonDefinition/resourceFolder icon-naming convention this relies on.
+RESOURCE_FOLDER = str(Path(__file__).parent / "resources" / "build")
 
 _handlers = []
 
@@ -49,7 +52,7 @@ def register(ui: "adsk.core.UserInterface") -> None:
     if existing:
         existing.deleteMe()
 
-    cmd_def = ui.commandDefinitions.addButtonDefinition(CMD_ID, CMD_NAME, CMD_DESCRIPTION)
+    cmd_def = ui.commandDefinitions.addButtonDefinition(CMD_ID, CMD_NAME, CMD_DESCRIPTION, RESOURCE_FOLDER)
     on_created = BuildCommandCreatedHandler()
     cmd_def.commandCreated.add(on_created)
     _handlers.append(on_created)

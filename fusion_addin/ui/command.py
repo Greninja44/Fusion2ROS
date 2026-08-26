@@ -29,6 +29,7 @@ this file -- see those modules' docstrings.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import traceback
 from pathlib import Path
@@ -51,7 +52,40 @@ CMD_DESCRIPTION = (
 # it avoids inventing a new toolbar tab/panel id no one has confirmed exists.
 PANEL_ID = "SolidCreatePanel"
 
+# Toolbar icon folder. Confirmed via Autodesk's official docs
+# (CommandDefinitions_addButtonDefinition.htm: resourceFolder is "the
+# resource folder that contains the images used for the icon. Icons can be
+# defined using either PNG or SVG files"; UserInterface_UM.htm's icon-naming
+# convention: Fusion looks inside this folder for files literally named
+# "16x16.png"/"32x32.png" -- the two sizes it actually uses for toolbar
+# buttons -- with optional "16x16@2x.png"/"32x32@2x.png" HiDPI variants and
+# optional "-<theme>" suffixes; a missing size is scaled from whichever one
+# IS present rather than erroring. The generate/validate/build/launch
+# resource folders here also ship 24x24.png/64x64.png (from the icon-asset
+# commit) -- those aren't part of the documented naming convention above, so
+# Fusion is not expected to pick them up on its own, but their presence
+# alongside the two required sizes is harmless.
+RESOURCE_FOLDER = str(Path(__file__).parent / "resources" / "generate")
+
+# Palette (task item 3): a richer, real HTML/CSS/JS "Detected Links/Joints"
+# tree, shown alongside this command's dialog. See detected_summary.html's
+# own comments for the rendering side, and _get_or_create_palette /
+# PaletteHTMLEventHandler below for the Python side. Confirmed against
+# Autodesk's official Palettes_UM.htm and Palettes_add.htm (add() argument
+# order below), and against the documented Palette Sample add-in's
+# create-once-and-reuse-via-itemById pattern (help.autodesk.com
+# PaletteSample_Sample.htm) -- see the per-call comments for exactly what
+# was confirmed vs. carried over as long-standing convention.
+PALETTE_ID = "fusion2ros_detected_summary_palette"
+PALETTE_HTML_PATH = str(Path(__file__).parent / "resources" / "palette" / "detected_summary.html")
+
 _handlers = []  # Fusion requires handlers to be kept alive; module-level list per standard pattern.
+
+# Last-known structured summary (app.robot_summary_as_dict's shape), kept
+# module-level so PaletteHTMLEventHandler can (re-)send it the moment the
+# palette's HTML signals it has finished loading ("ready"), independent of
+# whichever GenerateCommand* handler instance last computed it.
+_last_summary_dict: dict = {"links": [], "joints": []}
 
 
 def register(ui: "adsk.core.UserInterface") -> None:
@@ -59,7 +93,7 @@ def register(ui: "adsk.core.UserInterface") -> None:
     if existing:
         existing.deleteMe()
 
-    cmd_def = ui.commandDefinitions.addButtonDefinition(CMD_ID, CMD_NAME, CMD_DESCRIPTION)
+    cmd_def = ui.commandDefinitions.addButtonDefinition(CMD_ID, CMD_NAME, CMD_DESCRIPTION, RESOURCE_FOLDER)
     on_created = GenerateCommandCreatedHandler()
     cmd_def.commandCreated.add(on_created)
     _handlers.append(on_created)
@@ -78,7 +112,90 @@ def unregister(ui: "adsk.core.UserInterface") -> None:
     cmd_def = ui.commandDefinitions.itemById(CMD_ID)
     if cmd_def:
         cmd_def.deleteMe()
+
+    # Definitively tear down the palette on add-in stop (not just hide it --
+    # this is the actual end of its lifecycle), per PaletteSample_Sample.htm's
+    # documented stop()-time cleanup (`palette.deleteMe()` after `itemById`).
+    palette = ui.palettes.itemById(PALETTE_ID)
+    if palette:
+        palette.deleteMe()
+
     _handlers.clear()
+
+
+# ---------------------------------------------------------------------------
+# Palette lifecycle + Python<->HTML glue (task item 3).
+# ---------------------------------------------------------------------------
+
+
+def _get_or_create_palette(ui: "adsk.core.UserInterface"):
+    """Create-once-and-reuse pattern, confirmed via Autodesk's own
+    PaletteSample_Sample.htm: look the palette up by id first, and only
+    call palettes.add(...) the first time; every later call just re-shows
+    the existing one (isVisible = True) instead of recreating it.
+
+    Palettes.add's argument order (id, name, htmlFileURL, isVisible,
+    showCloseButton, isResizable, width, height[, useNewWebBrowser]) is
+    confirmed via Palettes_add.htm. `useNewWebBrowser` is left at its
+    documented default (True -- the modern Qt-based web view) rather than
+    passed explicitly, since nothing here depends on the older CEF browser's
+    synchronous adsk.fusionSendData behavior (detected_summary.html handles
+    both, see its own comments).
+    """
+    palette = ui.palettes.itemById(PALETTE_ID)
+    if palette is None:
+        palette = ui.palettes.add(
+            PALETTE_ID,
+            "Fusion2ROS: Detected Links/Joints",
+            PALETTE_HTML_PATH,
+            True,  # isVisible
+            True,  # showCloseButton
+            True,  # isResizable
+            360,  # width (px)
+            480,  # height (px)
+        )
+        on_html_event = PaletteHTMLEventHandler()
+        palette.incomingFromHTML.add(on_html_event)
+        _handlers.append(on_html_event)
+    else:
+        palette.isVisible = True
+    return palette
+
+
+def _push_summary_to_palette(ui: "adsk.core.UserInterface") -> None:
+    """Best-effort push of the current _last_summary_dict to the palette's
+    HTML side via Palette.sendInfoToHTML(action, data) -- confirmed via
+    Palette_sendInfoToHTML.htm; `data` is an arbitrary string, JSON here by
+    this add-in's own convention (matching detected_summary.html's JS side).
+    Never allowed to fail the surrounding command -- this is a UI nicety on
+    top of the always-present detected_summary text box, not load-bearing.
+    """
+    try:
+        palette = ui.palettes.itemById(PALETTE_ID)
+        if palette:
+            palette.sendInfoToHTML("update", json.dumps(_last_summary_dict))
+    except Exception:
+        pass
+
+
+class PaletteHTMLEventHandler(adsk.core.HTMLEventHandler):
+    """Confirmed via Palettes_UM.htm / Palette_sendInfoToHTML.htm: a
+    sendInfoToHTML call made before the palette's own HTML/JS has finished
+    loading (and registered its receive-side handler) has nowhere to land.
+    detected_summary.html's JS sends a `{action: "ready"}` event via
+    adsk.fusionSendData the moment it has finished loading; this handler
+    (registered on Palette.incomingFromHTML, per PaletteSample_Sample.htm)
+    reacts to exactly that by (re-)sending the latest known summary --
+    removing any guesswork about load timing on the Python side.
+    """
+
+    def notify(self, args: "adsk.core.HTMLEventArgs") -> None:
+        try:
+            html_args = adsk.core.HTMLEventArgs.cast(args)
+            if html_args.action == "ready":
+                _push_summary_to_palette(adsk.core.Application.get().userInterface)
+        except Exception:
+            pass  # palette readback is a nicety, never worth crashing the command over.
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +234,13 @@ def _refresh_detected_summary(inputs: "adsk.core.CommandInputs") -> None:
     on every keystroke/selection change and popping a dialog each time would
     be intrusive.
     """
+    global _last_summary_dict
+
     text_input = inputs.itemById("detected_summary")
     if text_input is None:
         return
+
+    ui = adsk.core.Application.get().userInterface
     try:
         robot_name_input = inputs.itemById("robot_name")
         robot_name = (robot_name_input.value.strip() if robot_name_input else "") or "robot"
@@ -128,14 +249,20 @@ def _refresh_detected_summary(inputs: "adsk.core.CommandInputs") -> None:
         design = adsk.fusion.Design.cast(fusion_app.activeProduct)
         if design is None:
             text_input.text = "(no active Design -- open/activate a design first)"
+            _last_summary_dict = {"links": [], "joints": [], "error": "no active Design"}
+            _push_summary_to_palette(ui)
             return
 
         root_component = _selected_root_component(inputs)
         reader = FusionDesignReaderAdapter(design, root_component=root_component)
         robot = app.build_robot_from_reader(reader, robot_name)
         text_input.text = app.format_robot_summary(robot)
+        _last_summary_dict = app.robot_summary_as_dict(robot)
+        _push_summary_to_palette(ui)
     except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
         text_input.text = f"(could not detect links/joints yet: {exc})"
+        _last_summary_dict = {"links": [], "joints": [], "error": str(exc)}
+        _push_summary_to_palette(ui)
 
 
 class GenerateCommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
@@ -207,12 +334,44 @@ class GenerateCommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             cmd.execute.add(on_execute)
             _handlers.append(on_execute)
 
+            # Show the richer HTML/JS "Detected Links/Joints" tree (task item
+            # 3) alongside this command's dialog, and hide it again once the
+            # dialog closes (on_destroy below) -- the TextBoxCommandInput
+            # readback above is kept as-is as a guaranteed-to-work fallback
+            # (e.g. if a given Fusion install's web-view is unavailable),
+            # so nothing regresses if the palette fails to show.
+            _get_or_create_palette(ui)
+
+            on_destroy = GenerateCommandDestroyHandler()
+            cmd.destroy.add(on_destroy)
+            _handlers.append(on_destroy)
+
             # Populate the readback once up front, using the just-added
             # inputs' initial values, so the user doesn't have to touch
             # anything first to see it.
             _refresh_detected_summary(inputs)
         except Exception:
             ui.messageBox(f"Fusion2ROS: failed to create command:\n{traceback.format_exc()}")
+
+
+class GenerateCommandDestroyHandler(adsk.core.CommandEventHandler):
+    """Confirmed via Command.htm's `destroy` event ("fired when the command
+    is destroyed... can be cleaned up") -- hides (not deletes) the palette
+    when this command's dialog closes, whether via execute or cancel, so it
+    doesn't linger as a stray window. The palette itself is reused (not
+    recreated) the next time "Generate ROS 2 Package" runs, per
+    _get_or_create_palette's create-once pattern; unregister() above deletes
+    it for real when the add-in stops.
+    """
+
+    def notify(self, args: "adsk.core.CommandEventArgs") -> None:
+        try:
+            ui = adsk.core.Application.get().userInterface
+            palette = ui.palettes.itemById(PALETTE_ID)
+            if palette:
+                palette.isVisible = False
+        except Exception:
+            pass
 
 
 class GenerateInputChangedHandler(adsk.core.InputChangedEventHandler):
@@ -229,6 +388,26 @@ class GenerateInputChangedHandler(adsk.core.InputChangedEventHandler):
 class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args: "adsk.core.CommandEventArgs") -> None:
         ui = adsk.core.Application.get().userInterface
+        # Confirmed via ProgressDialog.htm / ProgressDialog_show.htm:
+        # ui.createProgressDialog() makes the dialog; .show(title, message,
+        # minimumValue, maximumValue, delay=0) displays it, where `message`
+        # supports "%v"/"%m"/"%p" placeholders (current value/total/percent)
+        # that Fusion substitutes itself; .progressValue and .message are
+        # plain read/write properties; .maximumValue is also read/write
+        # (confirmed on the same ProgressDialog.htm reference), used below to
+        # widen the bar once generate_ros_package reports its real
+        # total_steps (unknown until generation starts, since it depends on
+        # which include_* flags are set); .wasCancelled reflects whether the
+        # dialog's own Cancel button (shown here via isCancelButtonShown)
+        # was clicked; .hide() tears it down.
+        #
+        # The dialog starts with a 1-step range and a generic message so
+        # something reasonable is on screen for the (typically brief) window
+        # before the first _report() callback fires and supplies the real
+        # total.
+        progress_dialog = ui.createProgressDialog()
+        progress_dialog.isCancelButtonShown = True
+        progress_dialog.show(CMD_NAME, "Preparing to generate...", 0, 1, 0)
         try:
             inputs = args.command.commandInputs
             robot_name = inputs.itemById("robot_name").value.strip()
@@ -252,6 +431,15 @@ class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
             reader = FusionDesignReaderAdapter(design, root_component=root_component)
             robot = app.build_robot_from_reader(reader, robot_name)
 
+            def _on_progress(stage_description: str, step: int, total_steps: int) -> None:
+                if progress_dialog.maximumValue != total_steps:
+                    progress_dialog.maximumValue = total_steps
+                progress_dialog.message = f"(%v/%m) {stage_description}"
+                progress_dialog.progressValue = step
+
+            def _should_cancel() -> bool:
+                return progress_dialog.wasCancelled
+
             with tempfile.TemporaryDirectory(prefix="fusion2ros_mesh_") as tmp_mesh_dir:
                 mesh_files = export_link_meshes(design, robot, Path(tmp_mesh_dir))
                 package_dir = app.generate_ros_package(
@@ -263,10 +451,17 @@ class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
                     include_moveit=include_moveit,
                     include_nav2=include_nav2,
                     moveit_group_name=moveit_group_name,
+                    progress_callback=_on_progress,
+                    should_cancel=_should_cancel,
                 )
 
             state.set_last_generated(package_dir, robot_name)
             ui.messageBox(f"Fusion2ROS: generated ROS 2 package at:\n{package_dir}")
+        except app.GenerationCancelled:
+            # Deliberate, user-initiated stop (Cancel button on the progress
+            # dialog) -- not an error, so no traceback / no PipelineError-style
+            # wall of text, just a plain confirmation.
+            ui.messageBox("Fusion2ROS: generation cancelled.")
         except app.PipelineError as exc:
             # exc's text is already a clear, itemized explanation (see
             # app.py's PipelineError docstring/raise sites) -- shown in full,
@@ -274,3 +469,5 @@ class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
             ui.messageBox(f"Fusion2ROS: {exc}")
         except Exception:
             ui.messageBox(f"Fusion2ROS: generation failed:\n{traceback.format_exc()}")
+        finally:
+            progress_dialog.hide()
