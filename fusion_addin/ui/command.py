@@ -77,7 +77,16 @@ RESOURCE_FOLDER = str(Path(__file__).parent / "resources" / "generate")
 # PaletteSample_Sample.htm) -- see the per-call comments for exactly what
 # was confirmed vs. carried over as long-standing convention.
 PALETTE_ID = "fusion2ros_detected_summary_palette"
-PALETTE_HTML_PATH = str(Path(__file__).parent / "resources" / "palette" / "detected_summary.html")
+# REAL BUG FOUND LIVE: Palettes.add()'s htmlFileURL argument needs an actual
+# URI, not a bare OS filesystem path. Passing a raw Windows path (e.g.
+# "C:\Users\...\detected_summary.html") made Fusion's internal browser
+# malform it into "file:///C:/%5CUsers%5C...%5Cdetected_summary.html" --
+# literally percent-encoding the backslashes instead of treating them as
+# path separators -- so the palette showed a "This site can't be reached /
+# ERR_INVALID_URL" page instead of the HTML. Path.as_uri() builds a correct
+# "file:///C:/Users/.../detected_summary.html" URI regardless of OS
+# separator, which is what's actually required here.
+PALETTE_HTML_PATH = (Path(__file__).parent / "resources" / "palette" / "detected_summary.html").as_uri()
 
 _handlers = []  # Fusion requires handlers to be kept alive; module-level list per standard pattern.
 
