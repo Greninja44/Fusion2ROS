@@ -235,9 +235,25 @@ pass/fail without opening Fusion at all.
 Core generators (URDF, `ros2_control`, Gazebo, MoveIt 2, Nav2) and the
 extraction/validation pipeline have all been exercised against real,
 installed ROS 2 binaries — `colcon build`, `ros2 launch`, `move_group`,
-`check_urdf`, and a live headless `gz sim` run — not just unit tests. The
-one confirmed external blocker, an upstream `gz_ros2_control` SIGSEGV on
-this machine's `gz-sim` version, is sidestepped via gz-sim's own native
-`DiffDrive`/`JointStatePublisher` plugins for differential-drive robots.
-Full details, including exactly which pieces are still unverified against a
-live Fusion 360 process, are in `docs/ARCHITECTURE.md`'s "Status" sections.
+`check_urdf`, and a live headless `gz sim` run — not just unit tests. Full
+details, including exactly which pieces are still unverified against a live
+Fusion 360 process, are in `docs/ARCHITECTURE.md`'s "Status" sections.
+
+### Known limitations
+
+- **`gz_ros2_control` SIGSEGV on non-differential-drive robots.** A robot
+  with `metadata["drivetrain"]["type"] == "differential_drive"` gets
+  gz-sim's native `DiffDrive` plugin, which is real-verified crash-free.
+  Anything else — an arm, `"mecanum_drive"`, or no drivetrain at all — still
+  falls back to `gz_ros2_control`, which has a confirmed upstream SIGSEGV
+  on some gz-sim versions ([ros-controls/gz_ros2_control#848](https://github.com/ros-controls/gz_ros2_control/issues/848),
+  filed against ROS Rolling's own CI, auto-closed stale/unfixed). This is
+  an external bug, not something fixable from this repo. The Fusion UI
+  warns about it in the generation report when it applies, rather than
+  letting you discover it via a crash.
+- **Nav2's `nav2_bringup` package itself was never exercised end-to-end**
+  on the machine this was built on (only individually-installed Nav2
+  servers were) — see `docs/ARCHITECTURE.md`'s Nav2 status note.
+- **Install is a symlink or a copy-script**, not a packaged Fusion 360
+  add-in you install from the Autodesk App Store — see
+  [Getting started](#getting-started).

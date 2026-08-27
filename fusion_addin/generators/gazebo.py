@@ -152,6 +152,19 @@ def _is_differential_drive(robot: Robot) -> bool:
     return bool(drivetrain) and drivetrain.get("type") == "differential_drive"
 
 
+def uses_gz_ros2_control_fallback(robot: Robot) -> bool:
+    """True when `generate_gazebo_xml(robot)` will emit the `gz_ros2_control`
+    plugin rather than gz-sim's native `DiffDrive` -- i.e. every case except
+    a `"differential_drive"` robot. Public (unlike `_is_differential_drive`)
+    specifically so callers outside this module -- `fusion_addin/ui/command.py`
+    -- can warn a user up front about the confirmed upstream
+    `gz_ros2_control` SIGSEGV on this machine's gz-sim version (see this
+    module's docstring / `docs/ARCHITECTURE.md`'s "Gazebo" section) instead
+    of them discovering it only after gz-sim crashes.
+    """
+    return not _is_differential_drive(robot)
+
+
 def _moving_joint_names(robot: Robot) -> List[str]:
     return [j.name for j in robot.joints if j.type != JointType.FIXED]
 
