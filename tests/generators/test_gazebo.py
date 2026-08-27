@@ -398,6 +398,8 @@ def test_spawn_launch_is_deterministic():
 
 
 def test_spawn_launch_appends_package_share_parent_to_gz_sim_resource_path():
+    pytest.importorskip("launch")
+    pytest.importorskip("launch_ros")
     robot = make_two_link_arm()
     text = generate_spawn_launch(robot)
     assert "AppendEnvironmentVariable" in text
