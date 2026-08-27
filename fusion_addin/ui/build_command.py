@@ -136,13 +136,17 @@ class BuildCommandExecuteHandler(adsk.core.CommandEventHandler):
             # used by command.py's GenerateCommandExecuteHandler.
             progress_dialog = ui.createProgressDialog()
             progress_dialog.isCancelButtonShown = False  # colcon build isn't cooperatively cancellable mid-flight
-            progress_dialog.show("Build in WSL", "Starting build...", 0, 0, 0)
+            # ProgressDialog.show rejects minimumValue == maximumValue outright
+            # (confirmed live: "RuntimeError: 3 : invalid argument minimumValue
+            # or maximumValue" when called with (0, 0, 0)) -- there is no
+            # documented indeterminate/marquee mode, so use the same (0, 1, 0)
+            # 1-step range command.py's GenerateCommandExecuteHandler already
+            # uses successfully. colcon gives no real total-step count anyway;
+            # the live message text (via on_output_line below) is the actual
+            # feedback, not the bar's fill level.
+            progress_dialog.show("Build in WSL", "Starting build...", 0, 1, 0)
 
             def _on_output_line(line: str) -> None:
-                # maximumValue stays 0 (an indeterminate/marquee-style bar,
-                # per ProgressDialog.htm) since colcon gives no total-step
-                # count to report against -- the live message text is the
-                # actual feedback here, not the bar's fill level.
                 progress_dialog.message = line[-200:] if line else progress_dialog.message
 
             try:

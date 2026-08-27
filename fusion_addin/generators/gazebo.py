@@ -57,10 +57,16 @@ Design notes
 """
 
 import xml.etree.ElementTree as ET
+from typing import Dict, List
 
-from robot_model import Robot
+from robot_model import JointType, Robot
 
-__all__ = ["generate_gazebo_xml", "generate_world_sdf", "generate_spawn_launch"]
+__all__ = [
+    "generate_gazebo_xml",
+    "generate_world_sdf",
+    "generate_spawn_launch",
+    "generate_gazebo_ros_bridge_yaml",
+]
 
 
 # --- gz_ros2_control plugin surface ----------------------------------------
@@ -92,6 +98,45 @@ GZ_ROS2_CONTROL_PLUGIN_FILENAME = "libgz_ros2_control-system.so"
 GZ_ROS2_CONTROL_PLUGIN_NAME = "gz_ros2_control::GazeboSimROS2ControlPlugin"
 
 
+# --- native gz-sim DiffDrive / JointStatePublisher plugins ------------------
+#
+# `gz_ros2_control` (above) is real-verified to SIGSEGV on load against this
+# machine's installed gz-sim 10.4.0 -- a confirmed, filed upstream bug
+# (ros-controls/gz_ros2_control#848, "Segfault in
+# GazeboSimROS2ControlPlugin::Configure()"), not something fixable from this
+# project's generator code (see docs/ARCHITECTURE.md's "Gazebo" verification
+# section for the full root-cause trace). For a `Robot` with a
+# `metadata["drivetrain"]` of type "differential_drive" (the same convention
+# `ros2_control.py`/`nav2.py` already key off), gz-sim ships a NATIVE
+# alternative that sidesteps gz_ros2_control entirely: `DiffDrive`, a
+# built-in gz-sim system plugin with no ros2_control dependency at all.
+#
+# Every tag name/plugin filename/message-type pairing below is copied from
+# two real files read directly off this machine's disk, not invented:
+#   - the plugin tag shape (filename, name, left_joint/right_joint,
+#     wheel_separation/wheel_radius, topic/odom_topic/frame_id/
+#     child_frame_id/odom_publish_frequency/tf_topic) from
+#     `/opt/ros/lyrical/share/turtlebot3_gazebo/models/turtlebot3_waffle/
+#     model.sdf`'s own real, shipped `DiffDrive` + `JointStatePublisher`
+#     plugin blocks -- a genuine ROS-shipped differential-drive robot using
+#     this exact gz-sim version;
+#   - the paired bridge message types (`geometry_msgs/msg/TwistStamped` <->
+#     `gz.msgs.Twist` for cmd_vel, `nav_msgs/msg/Odometry` <->
+#     `gz.msgs.Odometry` for odom, `tf2_msgs/msg/TFMessage` <->
+#     `gz.msgs.Pose_V` for tf, `sensor_msgs/msg/JointState` <->
+#     `gz.msgs.Model` for joint_states) from that same package's installed
+#     `turtlebot3_waffle_bridge.yaml`, which bridges exactly this plugin
+#     pair's topics for real.
+# `<odom_publish_frequency>` (not turtlebot3's own file's
+# "odom_publisher_frequency", almost certainly a harmless upstream typo
+# silently ignored by the plugin) is spelled per the plugin's own API docs
+# (gazebosim.org/api/sim/10/classgz_1_1sim_1_1systems_1_1DiffDrive.html).
+GZ_DIFF_DRIVE_PLUGIN_FILENAME = "gz-sim-diff-drive-system"
+GZ_DIFF_DRIVE_PLUGIN_NAME = "gz::sim::systems::DiffDrive"
+GZ_JOINT_STATE_PUBLISHER_PLUGIN_FILENAME = "gz-sim-joint-state-publisher-system"
+GZ_JOINT_STATE_PUBLISHER_PLUGIN_NAME = "gz::sim::systems::JointStatePublisher"
+
+
 def _controllers_yaml_param(robot_name: str) -> str:
     """Standard ROS 2 package-share convention: `generate_controllers_yaml`
     (the parallel ros2_control.py generator) is assumed to land its output
@@ -100,6 +145,20 @@ def _controllers_yaml_param(robot_name: str) -> str:
     `$(find <pkg>)` form gz_ros2_control's own docs use (see module-level
     comment above)."""
     return f"$(find {robot_name})/config/controllers.yaml"
+
+
+def _is_differential_drive(robot: Robot) -> bool:
+    drivetrain = robot.metadata.get("drivetrain") if robot.metadata else None
+    return bool(drivetrain) and drivetrain.get("type") == "differential_drive"
+
+
+def _moving_joint_names(robot: Robot) -> List[str]:
+    return [j.name for j in robot.joints if j.type != JointType.FIXED]
+
+
+def _base_frame_name(robot: Robot) -> str:
+    root = robot.root_link()
+    return root.name if root is not None else "base_link"
 
 
 def generate_gazebo_xml(robot: Robot) -> str:
@@ -111,9 +170,22 @@ def generate_gazebo_xml(robot: Robot) -> str:
       color (gz-sim does NOT understand classic Gazebo's
       ``<material>Gazebo/Blue</material>`` string-name convention -- see the
       tag-shape citation below).
-    - exactly one un-referenced, robot-level ``<gazebo>`` block loading the
-      ``gz_ros2_control`` plugin, with ``<parameters>`` pointing at
-      ``$(find <robot.name>)/config/controllers.yaml``.
+    - if `robot` has any non-fixed joint, one un-referenced ``<gazebo>``
+      block loading the native ``JointStatePublisher`` plugin (see the
+      module-level comment above it) so every joint's real simulated motion
+      reaches ROS as ``/joint_states`` -- without this, `robot_state_publisher`
+      has nothing to drive non-fixed joints' TF with in Gazebo, regardless
+      of drivetrain type.
+    - exactly one further un-referenced, robot-level ``<gazebo>`` block for
+      actuation: the native ``DiffDrive`` plugin (see the module-level
+      comment above it) when ``robot.metadata["drivetrain"]["type"] ==
+      "differential_drive"`` -- this fully replaces the need for
+      ``gz_ros2_control`` for that case, and avoids its confirmed SIGSEGV
+      entirely. Any other robot (no drivetrain, or an unsupported drivetrain
+      type like "mecanum_drive", which has no native gz-sim equivalent
+      confirmed here) falls back to the pre-existing ``gz_ros2_control``
+      plugin, unchanged -- still subject to the documented upstream crash,
+      but no regression for shapes this project can't yet route natively.
 
     Ambient/diffuse/specular are all set to the same RGBA -- there is no
     separate "shininess" concept in RobotModel's single-color `Material`, so
@@ -131,7 +203,14 @@ def generate_gazebo_xml(robot: Robot) -> str:
             continue
         fragment.append(_build_material_gazebo_element(link.name, link.material.rgba))
 
-    fragment.append(_build_ros2_control_plugin_element(robot.name))
+    moving_joints = _moving_joint_names(robot)
+    if moving_joints:
+        fragment.append(_build_joint_state_publisher_element(moving_joints))
+
+    if _is_differential_drive(robot):
+        fragment.append(_build_diff_drive_plugin_element(robot.metadata["drivetrain"], _base_frame_name(robot)))
+    else:
+        fragment.append(_build_ros2_control_plugin_element(robot.name))
 
     ET.indent(fragment, space="  ")
     body = ET.tostring(fragment, encoding="unicode")
@@ -186,6 +265,49 @@ def _build_ros2_control_plugin_element(robot_name: str) -> ET.Element:
         {"filename": GZ_ROS2_CONTROL_PLUGIN_FILENAME, "name": GZ_ROS2_CONTROL_PLUGIN_NAME},
     )
     ET.SubElement(plugin, "parameters").text = _controllers_yaml_param(robot_name)
+    return elem
+
+
+def _build_diff_drive_plugin_element(drivetrain: Dict[str, object], base_frame: str) -> ET.Element:
+    """<gazebo><plugin filename="gz-sim-diff-drive-system"
+    name="gz::sim::systems::DiffDrive">...</plugin></gazebo> -- tag shape and
+    values per the module-level GZ_DIFF_DRIVE_PLUGIN_* comment's citation.
+    `topic`/`odom_topic`/`frame_id`/`tf_topic` are fixed, plain names (not
+    gz-sim's own `/model/<name>/...` defaults) so they match the plain
+    `cmd_vel`/`odom`/`tf` topic names `generate_gazebo_ros_bridge_yaml`
+    bridges into ROS -- and `odom_frame_id`/`base_frame_id` conventions
+    `nav2.py` already assumes (`odom`, `robot.root_link().name`)."""
+    elem = ET.Element("gazebo")
+    plugin = ET.SubElement(
+        elem, "plugin", {"filename": GZ_DIFF_DRIVE_PLUGIN_FILENAME, "name": GZ_DIFF_DRIVE_PLUGIN_NAME}
+    )
+    ET.SubElement(plugin, "left_joint").text = str(drivetrain["left_wheel_joint"])
+    ET.SubElement(plugin, "right_joint").text = str(drivetrain["right_wheel_joint"])
+    ET.SubElement(plugin, "wheel_separation").text = _fmt_float(drivetrain["wheel_separation"])
+    ET.SubElement(plugin, "wheel_radius").text = _fmt_float(drivetrain["wheel_radius"])
+    ET.SubElement(plugin, "topic").text = "cmd_vel"
+    ET.SubElement(plugin, "odom_topic").text = "odom"
+    ET.SubElement(plugin, "frame_id").text = "odom"
+    ET.SubElement(plugin, "child_frame_id").text = base_frame
+    ET.SubElement(plugin, "odom_publish_frequency").text = "50"
+    ET.SubElement(plugin, "tf_topic").text = "/tf"
+    return elem
+
+
+def _build_joint_state_publisher_element(joint_names: List[str]) -> ET.Element:
+    """<gazebo><plugin filename="gz-sim-joint-state-publisher-system"
+    name="gz::sim::systems::JointStatePublisher"><topic>joint_states</topic>
+    one <joint_name> per non-fixed joint</plugin></gazebo> -- tag shape per
+    the module-level GZ_JOINT_STATE_PUBLISHER_PLUGIN_* comment's citation."""
+    elem = ET.Element("gazebo")
+    plugin = ET.SubElement(
+        elem,
+        "plugin",
+        {"filename": GZ_JOINT_STATE_PUBLISHER_PLUGIN_FILENAME, "name": GZ_JOINT_STATE_PUBLISHER_PLUGIN_NAME},
+    )
+    ET.SubElement(plugin, "topic").text = "joint_states"
+    for name in joint_names:
+        ET.SubElement(plugin, "joint_name").text = name
     return elem
 
 
@@ -295,7 +417,7 @@ def generate_world_sdf(world_name: str = "empty") -> str:
 # --- spawn launch file -------------------------------------------------
 
 
-def generate_spawn_launch(robot: Robot) -> str:
+def generate_spawn_launch(robot: Robot, include_bridge: bool = False) -> str:
     """Render a ``launch``/``launch_ros`` Python launch file that:
 
     1. Includes ``ros_gz_sim``'s own ``gz_sim.launch.py`` to start the gz-sim
@@ -312,6 +434,19 @@ def generate_spawn_launch(robot: Robot) -> str:
        supported way to spawn from a running RSP rather than a second file
        read (``-topic`` in ``create``'s own ``--help`` output: "Load XML from
        a ROS string publisher").
+    4. If ``include_bridge`` (opt-in; the caller, ``app.py``, passes True
+       exactly when it actually wrote a non-empty
+       ``config/ros_gz_bridge.yaml``), also starts ``ros_gz_bridge``'s
+       ``parameter_bridge`` node against that file -- confirmed the real,
+       documented parameter name for a YAML bridge list via that
+       executable's own ``--help`` (see
+       ``fusion_addin/generators/sensors.py``'s
+       ``generate_ros_gz_bridge_yaml`` docstring). Before this, the bridge
+       config was written to disk but nothing ever started the bridge
+       process against it -- a real, previously-undiscovered gap: even the
+       pre-existing sensor bridging silently required a manual
+       ``ros2 run ros_gz_bridge parameter_bridge`` invocation the generated
+       package never mentioned or automated.
 
     Verification, all against this machine's actually-installed `ros_gz_sim`
     package (``/opt/ros/lyrical/share/ros_gz_sim``, confirmed present via
@@ -340,6 +475,21 @@ def generate_spawn_launch(robot: Robot) -> str:
     xacro_filename = f"{robot.name}.urdf.xacro"
     world_filename = "empty.sdf"
     entity_name = robot.name
+
+    bridge_node_def = (
+        '''
+    bridge_node = Node(
+        package="ros_gz_bridge",
+        executable="parameter_bridge",
+        name="ros_gz_bridge",
+        output="screen",
+        parameters=[{"config_file": PathJoinSubstitution([pkg_share, "config", "ros_gz_bridge.yaml"])}],
+    )
+'''
+        if include_bridge
+        else ""
+    )
+    bridge_launch_entry = "\n        bridge_node," if include_bridge else ""
 
     return f'''"""Gazebo Sim (gz-sim) spawn launch file for the "{package_name}" robot.
 
@@ -408,13 +558,90 @@ def generate_launch_description():
             "allow_renaming": True,
         }}],
     )
-
+{bridge_node_def}
     return LaunchDescription([
         gz_sim,
         robot_state_publisher_node,
-        spawn_node,
+        spawn_node,{bridge_launch_entry}
     ])
 '''
+
+
+# --- generate_gazebo_ros_bridge_yaml ----------------------------------------
+
+
+def generate_gazebo_ros_bridge_yaml(robot: Robot) -> str:
+    """Render the `ros_gz_bridge` `parameter_bridge` YAML entries needed for
+    the plugins `generate_gazebo_xml` emits -- joint_states (whenever `robot`
+    has any non-fixed joint) and, for a "differential_drive" `robot`,
+    cmd_vel/odom/tf for the native `DiffDrive` plugin. Same flat
+    `- ros_topic_name: ...` list style (no `[...]` wrapper) as
+    `fusion_addin/generators/sensors.py`'s `generate_ros_gz_bridge_yaml`, so
+    `app.py` can string-concatenate this with that module's sensor entries
+    into one combined bridge config file.
+
+    Returns `""` (not `sensors.py`'s empty-list `"[]\\n"`) when there is
+    nothing to bridge -- concatenating `""` with another module's entries
+    (or with nothing at all) stays valid YAML either way, whereas
+    concatenating `"[]\\n"` with real entries would not.
+
+    Message-type pairings are the same real, installed-file-sourced ones
+    cited in the module-level `GZ_DIFF_DRIVE_PLUGIN_*`/
+    `GZ_JOINT_STATE_PUBLISHER_PLUGIN_*` comment above.
+    """
+    entries: List[Dict[str, str]] = []
+
+    if _moving_joint_names(robot):
+        entries.append(
+            {
+                "ros_topic_name": "joint_states",
+                "gz_topic_name": "joint_states",
+                "ros_type_name": "sensor_msgs/msg/JointState",
+                "gz_type_name": "gz.msgs.Model",
+                "direction": "GZ_TO_ROS",
+            }
+        )
+
+    if _is_differential_drive(robot):
+        entries.append(
+            {
+                "ros_topic_name": "cmd_vel",
+                "gz_topic_name": "cmd_vel",
+                "ros_type_name": "geometry_msgs/msg/TwistStamped",
+                "gz_type_name": "gz.msgs.Twist",
+                "direction": "ROS_TO_GZ",
+            }
+        )
+        entries.append(
+            {
+                "ros_topic_name": "odom",
+                "gz_topic_name": "odom",
+                "ros_type_name": "nav_msgs/msg/Odometry",
+                "gz_type_name": "gz.msgs.Odometry",
+                "direction": "GZ_TO_ROS",
+            }
+        )
+        entries.append(
+            {
+                "ros_topic_name": "tf",
+                "gz_topic_name": "tf",
+                "ros_type_name": "tf2_msgs/msg/TFMessage",
+                "gz_type_name": "gz.msgs.Pose_V",
+                "direction": "GZ_TO_ROS",
+            }
+        )
+
+    if not entries:
+        return ""
+
+    lines = []
+    for entry in entries:
+        lines.append(f"- ros_topic_name: \"{entry['ros_topic_name']}\"")
+        lines.append(f"  gz_topic_name: \"{entry['gz_topic_name']}\"")
+        lines.append(f"  ros_type_name: \"{entry['ros_type_name']}\"")
+        lines.append(f"  gz_type_name: \"{entry['gz_type_name']}\"")
+        lines.append(f"  direction: {entry['direction']}")
+    return "\n".join(lines) + "\n"
 
 
 # --- shared helpers ----------------------------------------------------
