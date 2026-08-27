@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -8,8 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from fusion_addin.app import (
     GenerationCancelled,
     PipelineError,
+    _sanitize_ros_package_name,
     attach_collision_proxies,
     attach_mesh_references,
+    build_robot_from_reader,
     check_missing_actuator_limits,
     format_robot_summary,
     generate_ros_package,
@@ -210,6 +214,103 @@ def test_run_pipeline_end_to_end(tmp_path):
     robot.joint("joint1").effort_limit = 10.0
     package_dir = generate_ros_package(robot, {}, tmp_path)
     assert (package_dir / "urdf" / "e2e_robot.urdf.xacro").exists()
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_ros_package_name / build_robot_from_reader -- real bug found
+# live: Fusion's default root component name is literally "Main Assembly",
+# which the "Robot name" UI field defaults to verbatim (command.py), and
+# every generator (package.py, ros2_control.py, gazebo.py, nav2.py) uses
+# robot.name as-is for the package directory, package.xml <name>, and
+# CMakeLists.txt project(). colcon's real package-name validation
+# (catkin_pkg.package.Package.validate: requires
+# `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) hard-rejects a name containing a space, so
+# colcon silently drops the whole package ("ignoring unknown package") and
+# 0 packages get built -- confirmed live with a real generated package
+# named "Main Assembly".
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw_name, expected",
+    [
+        ("Main Assembly", "main_assembly"),
+        ("already_valid", "already_valid"),
+        ("R6A2-Arm!!", "r6a2_arm"),
+        ("  leading and trailing  ", "leading_and_trailing"),
+        ("123_starts_with_digit", "robot_123_starts_with_digit"),
+        ("", "robot"),
+        ("!!!", "robot"),
+    ],
+)
+def test_sanitize_ros_package_name(raw_name, expected):
+    assert _sanitize_ros_package_name(raw_name) == expected
+
+
+def test_build_robot_from_reader_sanitizes_robot_name():
+    base = FusionOccurrence(
+        name="base_link:1",
+        pose=FusionPose(),
+        inertia=FusionInertia(mass=1.0, center_of_mass=(0, 0, 0), ixx=100, iyy=100, izz=100, ixy=0, ixz=0, iyz=0),
+    )
+    reader = FakeFusionDesignReader([base], [])
+
+    robot = build_robot_from_reader(reader, "Main Assembly")
+
+    assert robot.name == "main_assembly"
+
+
+@pytest.mark.skipif(
+    shutil.which("colcon") is None or not Path("/opt/ros/lyrical/setup.bash").is_file(),
+    reason="colcon and/or /opt/ros/lyrical/setup.bash not available in this environment",
+)
+def test_run_pipeline_with_fusion_default_name_builds_with_colcon(tmp_path):
+    """End-to-end reproduction of the real bug: run_pipeline with Fusion's
+    actual default robot name ("Main Assembly") must still produce a
+    package colcon can build, not one it silently ignores."""
+    base = FusionOccurrence(
+        name="base_link:1",
+        pose=FusionPose(),
+        inertia=FusionInertia(mass=1.0, center_of_mass=(0, 0, 0), ixx=100, iyy=100, izz=100, ixy=0, ixz=0, iyz=0),
+    )
+    arm = FusionOccurrence(
+        name="arm:1",
+        pose=FusionPose(xyz=(5.0, 0.0, 0.0)),
+        inertia=FusionInertia(mass=1.0, center_of_mass=(5, 0, 0), ixx=100, iyy=135, izz=135, ixy=0, ixz=0, iyz=0),
+    )
+    joint = FusionJointInfo(
+        name="joint1",
+        joint_type="RevoluteJointType",
+        occurrence_one="base_link:1",
+        occurrence_two="arm:1",
+        origin=FusionPose(xyz=(5.0, 0.0, 0.0)),
+        axis=(0.0, 0.0, 1.0),
+        lower_limit=-1.0,
+        upper_limit=1.0,
+    )
+    reader = FakeFusionDesignReader([base, arm], [joint])
+
+    from fusion_addin.extraction.converter import build_robot_model
+
+    robot = build_robot_model(reader, _sanitize_ros_package_name("Main Assembly"))
+    robot.joint("joint1").velocity_limit = 2.0
+    robot.joint("joint1").effort_limit = 10.0
+    package_dir = generate_ros_package(robot, {}, tmp_path)
+    assert robot.name == "main_assembly"
+
+    # NEVER touch ~/ros2_ws -- build in a fully throwaway workspace.
+    ws_dir = tmp_path / "colcon_ws"
+    src_dir = ws_dir / "src" / robot.name
+    src_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(package_dir, src_dir)
+
+    cmd = f"source /opt/ros/lyrical/setup.bash && cd {ws_dir} && colcon build --packages-select {robot.name}"
+    result = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=300)
+
+    assert result.returncode == 0, (
+        f"colcon build failed (rc={result.returncode})\n"
+        f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+    )
 
 
 # ---------------------------------------------------------------------------

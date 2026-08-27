@@ -11,6 +11,7 @@ tested with a fake FusionDesignReader and plain paths.
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -24,6 +25,44 @@ from .extraction.converter import build_robot_model
 from .extraction.interface import FusionDesignReader
 from .generators.package import generate_package
 from .generators.urdf import generate_urdf_xacro
+
+_INVALID_PACKAGE_NAME_CHARS = re.compile(r"[^a-z0-9_]+")
+
+
+def _sanitize_ros_package_name(name: str) -> str:
+    """Turn an arbitrary Fusion component/robot name into a valid ROS 2
+    package identifier.
+
+    Real bug found live: Fusion's default root component name is literally
+    "Main Assembly", and the "Robot name" UI field in command.py defaults to
+    that verbatim -- every generator in this project (package.py,
+    ros2_control.py, gazebo.py, nav2.py, urdf.py's `package://` mesh URIs)
+    then used the raw robot.name as-is for the package directory name,
+    package.xml <name>, and CMakeLists.txt project(). colcon's actual
+    package-name validation (catkin_pkg.package.Package.validate, confirmed
+    by reading the installed package: requires
+    `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) rejects a name containing a space
+    outright -- not a warning, a hard "does not follow naming conventions"
+    error -- so colcon silently drops the whole package
+    ("ignoring unknown package") and 0 packages get built, no matter how
+    correct everything else in the generated tree is. Confirmed live:
+    `colcon build --packages-select "Main Assembly"` on a real generated
+    package reproduces exactly that failure.
+
+    Sanitizing once here, at the single point where a Fusion-supplied name
+    becomes `robot.name`, means every downstream generator (which all read
+    `robot.name` directly) gets a valid, consistent identifier for free,
+    rather than requiring each call site to sanitize independently and risk
+    a mismatch (e.g. a mesh's `package://` URI referencing a different
+    string than the package actually installs as).
+    """
+    sanitized = _INVALID_PACKAGE_NAME_CHARS.sub("_", name.strip().lower())
+    sanitized = re.sub("_+", "_", sanitized).strip("_")
+    if not sanitized:
+        return "robot"
+    if not sanitized[0].isalpha():
+        sanitized = f"robot_{sanitized}"
+    return sanitized
 
 
 class PipelineError(Exception):
@@ -45,8 +84,13 @@ def build_robot_from_reader(reader: FusionDesignReader, robot_name: str) -> Robo
     """Thin, named pass-through to converter.build_robot_model -- exists so
     callers (fusion_addin/ui/command.py) that need the Robot *before* mesh
     export (mesh export needs the live Design between this step and
-    generate_ros_package) don't have to import converter directly."""
-    return build_robot_model(reader, robot_name)
+    generate_ros_package) don't have to import converter directly.
+
+    Sanitizes `robot_name` into a valid ROS 2 package identifier first (see
+    `_sanitize_ros_package_name`) -- this is the one place a raw Fusion
+    component/UI name becomes `Robot.name`, which every generator downstream
+    treats as the actual package name."""
+    return build_robot_model(reader, _sanitize_ros_package_name(robot_name))
 
 
 def check_missing_actuator_limits(robot: Robot) -> List[str]:
