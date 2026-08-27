@@ -397,6 +397,25 @@ def test_spawn_launch_is_deterministic():
     assert generate_spawn_launch(robot) == generate_spawn_launch(robot)
 
 
+def test_spawn_launch_appends_package_share_parent_to_gz_sim_resource_path():
+    robot = make_two_link_arm()
+    text = generate_spawn_launch(robot)
+    assert "AppendEnvironmentVariable" in text
+    assert "GZ_SIM_RESOURCE_PATH" in text
+    namespace: dict = {}
+    exec(compile(text, "<generated spawn launch>", "exec"), namespace)
+    launch_description = namespace["generate_launch_description"]()
+    actions = launch_description.entities
+    resource_path_action = next(
+        a for a in actions if a.__class__.__name__ == "AppendEnvironmentVariable"
+    )
+    # Must run before gz_sim's own IncludeLaunchDescription so the server
+    # process actually inherits the appended value.
+    assert actions.index(resource_path_action) < next(
+        i for i, a in enumerate(actions) if a.__class__.__name__ == "IncludeLaunchDescription"
+    )
+
+
 # --- real-tool integration checks (skip cleanly if unavailable) ------------
 
 
