@@ -447,6 +447,24 @@ def generate_spawn_launch(robot: Robot, include_bridge: bool = False) -> str:
        pre-existing sensor bridging silently required a manual
        ``ros2 run ros_gz_bridge parameter_bridge`` invocation the generated
        package never mentioned or automated.
+    5. Appends this package's own installed share directory to
+       ``GZ_SIM_RESOURCE_PATH`` before gz-sim starts. Spawning from a live
+       ``/robot_description`` topic converts the URDF to SDF internally
+       (via ``sdformat_urdf``), and that conversion rewrites each
+       ``package://<robot>/meshes/...`` mesh URI to ``model://<robot>/meshes/...``
+       -- SDF has no ``package://`` scheme of its own. Without this, gz-sim's
+       GUI cannot resolve those ``model://`` URIs at all (a real, previously
+       unfixed gap: the robot spawns and simulates correctly -- physics is
+       unaffected -- but renders with no meshes). The fix mirrors the exact
+       ``AppendEnvironmentVariable`` pattern read directly off this
+       machine's installed ``turtlebot3_gazebo/launch/empty_world.launch.py``,
+       adjusted for this package's own mesh layout: meshes install to
+       ``share/<robot>/meshes/...``, so appending ``share/<robot>/..`` (i.e.
+       the ``share/`` directory itself, one level up from
+       ``FindPackageShare(<robot>)``) is what makes
+       ``model://<robot>/meshes/...`` resolve, unlike turtlebot3's own
+       ``.../models`` subfolder convention (its models live one directory
+       level down from its package share root, not directly under it).
 
     Verification, all against this machine's actually-installed `ros_gz_sim`
     package (``/opt/ros/lyrical/share/ros_gz_sim``, confirmed present via
@@ -506,7 +524,7 @@ confirmed real on this machine's ROS 2 "lyrical" / gz-sim 10.4.0 install.
 """
 
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import AppendEnvironmentVariable, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, PathJoinSubstitution, TextSubstitution
 from launch_ros.actions import Node
@@ -539,6 +557,17 @@ def generate_launch_description():
         launch_arguments={{"gz_args": [TextSubstitution(text="-r "), world_path]}}.items(),
     )
 
+    # Lets gz-sim's GUI resolve model://PACKAGE_NAME/meshes/... URIs (the
+    # sdformat_urdf-rewritten form of this package's URDF's own
+    # package://PACKAGE_NAME/meshes/... mesh references) -- see
+    # generate_spawn_launch's docstring in fusion_addin/generators/gazebo.py
+    # for why "share/.." (not "share" itself) is the directory that has to
+    # go on GZ_SIM_RESOURCE_PATH for this package's mesh layout.
+    set_gz_resource_path = AppendEnvironmentVariable(
+        "GZ_SIM_RESOURCE_PATH",
+        PathJoinSubstitution([pkg_share, ".."]),
+    )
+
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
@@ -560,6 +589,7 @@ def generate_launch_description():
     )
 {bridge_node_def}
     return LaunchDescription([
+        set_gz_resource_path,
         gz_sim,
         robot_state_publisher_node,
         spawn_node,{bridge_launch_entry}

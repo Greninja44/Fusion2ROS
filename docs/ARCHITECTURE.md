@@ -146,3 +146,33 @@ Real-verified, live, end-to-end (`tests/generators/test_gazebo.py::test_diff_dri
 Two more real, previously-latent gaps found and fixed in the same pass: (1) `config/ros_gz_bridge.yaml` was written to disk (for sensors) but nothing ever started the bridge process against it — `generate_spawn_launch` now optionally starts `ros_gz_bridge`'s `parameter_bridge` node itself (`include_bridge=True`, which `app.py` passes whenever there's an actual bridge config to read); (2) `package.xml`'s `<depend>` list was entirely hardcoded regardless of `include_*` flags, so a Gazebo-enabled package never declared `ros_gz_sim`/`ros_gz_bridge`/`gz_ros2_control` as dependencies at all — `generate_package` now takes an `extra_depends` list, and `app.py` populates it from the `include_gazebo` flag.
 
 Robots with an unsupported/absent drivetrain (an arm, or `"mecanum_drive"`, which has no native gz-sim equivalent confirmed here) still fall back to the original `gz_ros2_control` plugin, unchanged — still subject to the documented upstream crash, but not regressed.
+
+## Status update: gz-sim GUI mesh rendering (`GZ_SIM_RESOURCE_PATH`)
+
+A real, previously-unfixed gap: `gazebo.launch.py` spawns the robot from a
+live `/robot_description` topic (see `generate_spawn_launch`'s docstring),
+and that URDF→SDF conversion (`sdformat_urdf`) rewrites every
+`package://<robot>/meshes/...` mesh URI in the URDF into a
+`model://<robot>/meshes/...` SDF URI — SDF has no `package://` scheme of
+its own. Without `GZ_SIM_RESOURCE_PATH` pointing somewhere that contains a
+`<robot>/meshes/...` subtree, gz-sim's GUI can't resolve those URIs at all:
+the robot still spawns and simulates correctly (physics/TF/joint states are
+unaffected — this is purely a rendering gap), but every visual mesh fails
+to load.
+
+Reproduced and fixed for real against the user's live `main_assembly`
+rover package, not just synthetically: running the pre-fix
+`gazebo.launch.py` produced 15 distinct
+`[SystemPaths.cc] Unable to find file with URI [model://main_assembly/meshes/...]`
+/ `Failed to load geometry for visual` GUI errors (one pair per mesh file).
+`generate_spawn_launch` now adds an `AppendEnvironmentVariable` action —
+the same real pattern read directly off this machine's installed
+`turtlebot3_gazebo/launch/empty_world.launch.py` — appending
+`FindPackageShare(<robot>) + "/.."` (i.e. the package's `share/` directory,
+one level above its own share root) to `GZ_SIM_RESOURCE_PATH` before gz-sim
+starts, since this package's meshes install to `share/<robot>/meshes/...`
+directly (unlike turtlebot3's own `.../models/<model_name>/` layout, which
+needs its `models` subfolder appended instead). Re-running the identical
+live `ros2 launch main_assembly gazebo.launch.py` after the fix: zero
+"unable to find"/"failed to load geometry" errors, `Entity creation
+successful` unchanged.
