@@ -313,6 +313,18 @@ def test_known_unsupported_joint_type_raises_specific_error():
         build_robot_model(make_two_link_reader(joint_info), "bad_robot")
 
 
+def test_inferred_joint_type_raises_specific_error():
+    joint_info = FusionJointInfo(
+        name="inferred_joint",
+        joint_type="InferredJointType",
+        occurrence_one="base:1",
+        occurrence_two="top:1",
+        origin=FusionPose(),
+    )
+    with pytest.raises(UnsupportedJointTypeError, match="InferredJointType"):
+        build_robot_model(make_two_link_reader(joint_info), "bad_robot")
+
+
 def test_unrecognized_joint_type_string_raises_not_silently_dropped():
     joint_info = FusionJointInfo(
         name="mystery_joint",
@@ -352,6 +364,114 @@ def test_multiple_disconnected_roots_raises():
     )
     reader = FakeFusionDesignReader([a, b], [])  # no joint connects them -> 2 roots
     with pytest.raises(ExtractionError, match="unconnected root"):
+        build_robot_model(reader, "bad_robot")
+
+
+# ---------------------------------------------------------------------------
+# Unjointed "orphan" hardware (screws, resistors, wires -- real assemblies
+# routinely have dozens with no Fusion Joint feature at all) is fused onto
+# its nearest jointed neighbor instead of hard-failing generation.
+# ---------------------------------------------------------------------------
+
+
+def test_unjointed_occurrence_is_fused_not_treated_as_extra_root():
+    reader = make_three_link_arm_reader()
+    screw = FusionOccurrence(
+        name="screw:1",
+        pose=FusionPose(xyz=(0.0, 0.0, 0.0)),  # co-located with base_link:1
+        inertia=FusionInertia(
+            mass=1.0, center_of_mass=(0.0, 0.0, 0.0),
+            ixx=10.0, iyy=10.0, izz=10.0, ixy=0.0, ixz=0.0, iyz=0.0,
+        ),
+    )
+    reader._occurrences.append(screw)
+
+    robot = build_robot_model(reader, "test_arm")
+
+    # Still exactly 3 links -- the screw did not become a 4th, disconnected root.
+    assert len(robot.links) == 3
+    assert {l.name for l in robot.links} == {"base_link_1", "link1_1", "link2_1"}
+
+
+def test_unjointed_occurrence_fuses_mass_and_inertia_into_nearest_link():
+    reader = make_three_link_arm_reader()
+    screw = FusionOccurrence(
+        name="screw:1",
+        pose=FusionPose(xyz=(0.0, 0.0, 0.0)),  # nearest to base_link:1 (at origin)
+        inertia=FusionInertia(
+            mass=1.0, center_of_mass=(0.0, 0.0, 0.0),
+            ixx=10.0, iyy=10.0, izz=10.0, ixy=0.0, ixz=0.0, iyz=0.0,
+        ),
+    )
+    reader._occurrences.append(screw)
+
+    robot = build_robot_model(reader, "test_arm")
+    base = robot.link("base_link_1")
+
+    # base_link_1 alone: mass=2.0, ixx/iyy/izz=100/200/300 kg*cm^2 (see
+    # make_three_link_arm_reader). Fused with the screw (mass=1.0,
+    # ixx=iyy=izz=10, all about the same world origin with com=(0,0,0) same
+    # as base's own pose, so parallel-axis shift and frame rotation are both
+    # no-ops here) -> mass=3.0, ixx=110, iyy=210, izz=310 kg*cm^2 -> /10000 for m^2.
+    assert base.inertial.mass == pytest.approx(3.0)
+    assert base.inertial.center_of_mass == pytest.approx((0.0, 0.0, 0.0))
+    assert base.inertial.ixx == pytest.approx(0.011)
+    assert base.inertial.iyy == pytest.approx(0.021)
+    assert base.inertial.izz == pytest.approx(0.031)
+    assert base.metadata["fused_occurrences"] == ["screw:1"]
+
+    link1 = robot.link("link1_1")
+    link2 = robot.link("link2_1")
+    assert "fused_occurrences" not in link1.metadata
+    assert "fused_occurrences" not in link2.metadata
+    robot.validate()
+
+
+def test_unjointed_occurrence_fuses_onto_spatially_nearest_link_not_root():
+    reader = make_three_link_arm_reader()
+    # link2:1 sits at (20, 0, 0); this washer is right next to it (0.5 cm
+    # away) and much farther from base_link:1 (20 cm) and link1:1 (10.5 cm).
+    # About-COM inertia diag(0.01,0.01,0.01), shifted to about-world-origin
+    # via the parallel axis theorem (mass*(|c|^2*Id - c(x)c), c=(20.5,0,0)cm)
+    # to keep this a physically valid rigid body, same discipline as
+    # make_three_link_arm_reader's own fixture comments.
+    washer = FusionOccurrence(
+        name="washer:1",
+        pose=FusionPose(xyz=(20.5, 0.0, 0.0)),
+        inertia=FusionInertia(
+            mass=0.1, center_of_mass=(20.5, 0.0, 0.0),
+            ixx=0.01, iyy=42.035, izz=42.035, ixy=0.0, ixz=0.0, iyz=0.0,
+        ),
+    )
+    reader._occurrences.append(washer)
+
+    robot = build_robot_model(reader, "test_arm")
+    assert robot.link("link2_1").metadata["fused_occurrences"] == ["washer:1"]
+    assert "fused_occurrences" not in robot.link("base_link_1").metadata
+    assert "fused_occurrences" not in robot.link("link1_1").metadata
+
+
+def test_two_separate_jointed_mechanisms_still_raises():
+    # Two independently-jointed 2-link chains with no joint (or even an
+    # orphan) tying them together -- a genuine kinematic ambiguity, unlike
+    # plain unjointed hardware, so this must still fail.
+    def occ(name, x):
+        return FusionOccurrence(
+            name=name, pose=FusionPose(xyz=(x, 0.0, 0.0)),
+            inertia=FusionInertia(mass=1.0, center_of_mass=(0, 0, 0), ixx=1, iyy=1, izz=1, ixy=0, ixz=0, iyz=0),
+        )
+
+    c1, c2, d1, d2 = occ("c1:1", 0.0), occ("c2:1", 1.0), occ("d1:1", 10.0), occ("d2:1", 11.0)
+    joint_c = FusionJointInfo(
+        name="joint_c", joint_type="RigidJointType", occurrence_one="c1:1", occurrence_two="c2:1",
+        origin=FusionPose(),
+    )
+    joint_d = FusionJointInfo(
+        name="joint_d", joint_type="RigidJointType", occurrence_one="d1:1", occurrence_two="d2:1",
+        origin=FusionPose(),
+    )
+    reader = FakeFusionDesignReader([c1, c2, d1, d2], [joint_c, joint_d])
+    with pytest.raises(ExtractionError, match="separate joint-connected mechanisms"):
         build_robot_model(reader, "bad_robot")
 
 

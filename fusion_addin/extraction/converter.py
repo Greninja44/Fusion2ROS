@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 
 from robot_model import Inertial, Joint, JointType, Link, Pose, Robot
 
-from .interface import FusionDesignReader, FusionJointInfo, FusionOccurrence, FusionPose, Vec3
+from .interface import FusionDesignReader, FusionInertia, FusionJointInfo, FusionOccurrence, FusionPose, Vec3
 
 CM_TO_M = 0.01
 CM2_TO_M2 = CM_TO_M * CM_TO_M  # kg*cm^2 -> kg*m^2
@@ -51,11 +51,18 @@ _PRISMATIC_TYPES = {"SliderJointType"}
 # than "anything else") so the error message is precise and so a genuinely
 # unrecognized string (typo, future Fusion joint type, etc.) is reported
 # differently from a *known-but-unsupported* one.
+#
+# InferredJointType added after confirming, live, that adsk.fusion.JointTypes
+# has an 8th member beyond the seven originally documented here (see
+# fusion_adapter.py's _JOINT_TYPE_INT_TO_STR comment) -- its exact motion
+# semantics aren't confirmed, so it's treated as unsupported rather than
+# guessed at, same as the other multi-DOF types.
 _KNOWN_UNSUPPORTED_TYPES = {
     "CylindricalJointType",
     "PinSlotJointType",
     "PlanarJointType",
     "BallJointType",
+    "InferredJointType",
 }
 
 
@@ -326,14 +333,111 @@ def sanitize_link_name(name: str) -> str:
     return cleaned.strip("_") or "link"
 
 
+def _merge_fusion_inertia(items: List[FusionInertia]) -> FusionInertia:
+    """Combines several occurrences' raw inertia into one, as if they were a
+    single rigid body. Valid because FusionInertia's ixx/iyy/izz/ixy/ixz/iyz
+    are, per interface.py's documented convention, all about the SAME
+    reference point (the world origin) and the SAME axes (world-aligned) for
+    every occurrence -- inertia tensors about a common point are directly
+    additive for a system of rigid bodies, so no shifting/rotating is needed
+    before summing; _convert_inertial does that step once, afterward, using
+    the host occurrence's own pose."""
+    total_mass = sum(i.mass for i in items)
+    if total_mass > 0:
+        com = tuple(sum(i.mass * i.center_of_mass[k] for i in items) / total_mass for k in range(3))
+    else:
+        com = items[0].center_of_mass
+    return FusionInertia(
+        mass=total_mass,
+        center_of_mass=com,  # type: ignore[arg-type]
+        ixx=sum(i.ixx for i in items),
+        iyy=sum(i.iyy for i in items),
+        izz=sum(i.izz for i in items),
+        ixy=sum(i.ixy for i in items),
+        ixz=sum(i.ixz for i in items),
+        iyz=sum(i.iyz for i in items),
+    )
+
+
+def _merge_bounding_boxes(boxes: List[Optional[Tuple[Vec3, Vec3]]]) -> Optional[Tuple[Vec3, Vec3]]:
+    present = [b for b in boxes if b is not None]
+    if not present:
+        return None
+    mins = tuple(min(b[0][k] for b in present) for k in range(3))
+    maxs = tuple(max(b[1][k] for b in present) for k in range(3))
+    return (mins, maxs)  # type: ignore[return-value]
+
+
+def _fuse_occurrences(host: FusionOccurrence, orphans: List[FusionOccurrence]) -> FusionOccurrence:
+    """Builds a synthetic FusionOccurrence standing in for `host` plus every
+    `orphans` occurrence fused onto it -- same name/pose as host (so it still
+    becomes exactly one robot_model.Link, in host's own local frame), but
+    with orphans' mass/inertia, body names, and bounding box folded in. See
+    build_robot_model's docstring for why orphans exist at all.
+
+    NOTE: only mass/inertia/collision-bbox are fused this way -- mesh export
+    (fusion_addin/generators/mesh.py) still exports only the host occurrence's
+    own Fusion bodies, so fused hardware (screws, resistors, etc.) affects
+    physics correctly but does not yet appear in the generated visual mesh.
+    """
+    if not orphans:
+        return host
+    ordered_orphans = sorted(orphans, key=lambda o: o.name)
+    merged_body_names = list(host.body_names) + [n for o in ordered_orphans for n in o.body_names]
+    merged_bbox = _merge_bounding_boxes([host.bounding_box, *(o.bounding_box for o in ordered_orphans)])
+    merged_inertia = _merge_fusion_inertia([host.inertia, *(o.inertia for o in ordered_orphans)])
+    return FusionOccurrence(
+        name=host.name,
+        pose=host.pose,
+        inertia=merged_inertia,
+        body_names=merged_body_names,
+        bounding_box=merged_bbox,
+    )
+
+
+def _nearest_by_name(orphan: FusionOccurrence, candidates: Dict[str, FusionOccurrence]) -> str:
+    """Nearest candidate occurrence to `orphan` by straight-line distance
+    between their (world-frame) pose.xyz -- the only spatial hint available
+    (see interface.py: occurrence nesting/parenting in Fusion's own component
+    tree is deliberately not exposed here, only the flattened joint graph).
+    Ties broken by sorted name order for determinism."""
+
+    def dist2(name: str) -> float:
+        c, o = candidates[name].pose.xyz, orphan.pose.xyz
+        return sum((c[k] - o[k]) ** 2 for k in range(3))
+
+    return min(sorted(candidates), key=dist2)
+
+
 def build_robot_model(reader: FusionDesignReader, robot_name: str) -> Robot:
     """Walks a FusionDesignReader's occurrences and joints and produces a
     fully-populated, validated robot_model.Robot.
 
-    Topology: exactly one robot_model.Link per FusionOccurrence. Parent/child
-    structure comes entirely from FusionJointInfo.occurrence_one (parent) /
-    occurrence_two (child); the single occurrence never named as a child is
-    the tree's root link.
+    Topology: one robot_model.Link per JOINTED FusionOccurrence (i.e. one
+    that appears as either side of at least one FusionJointInfo). Parent/
+    child structure comes entirely from FusionJointInfo.occurrence_one
+    (parent) / occurrence_two (child); the single jointed occurrence never
+    named as a child is the tree's root link.
+
+    Occurrences that appear in NO joint at all ("orphans" -- real CAD
+    assemblies routinely have dozens of these: screws, resistors, wires,
+    other fasteners positioned in place but never given an explicit Fusion
+    Joint feature) are not turned into their own links -- Fusion's assembly
+    nesting is deliberately not exposed here (see FusionDesignReader's
+    docstring), so there is no reliable way to know which link they should
+    parent under. Instead, each orphan is fused onto whichever JOINTED
+    occurrence is spatially closest to it (see _nearest_by_name): its mass
+    and inertia contribute to that link's physics, and its bounding box
+    contributes to that link's collision proxy. This is a deliberate
+    approximation, not a bug -- see _fuse_occurrences' docstring for the one
+    thing it does NOT do (fuse into the exported visual mesh).
+
+    This fusing only kicks in once at least one real joint exists somewhere
+    in the design. A design with NO joints at all keeps the original,
+    stricter behavior (a single occurrence is trivially the whole robot;
+    multiple occurrences with zero joints between them is still a hard
+    error) -- with no joint anywhere, there is no kinematic information to
+    even choose a sensible "nearest jointed occurrence" host from.
     """
     occurrences: Dict[str, FusionOccurrence] = {}
     for occ in reader.list_occurrences():
@@ -360,20 +464,46 @@ def build_robot_model(reader: FusionDesignReader, robot_name: str) -> Robot:
             )
         joint_by_child[j.occurrence_two] = j
 
-    roots = [name for name in occurrences if name not in joint_by_child]
-    if len(roots) == 0:
-        raise ExtractionError(
-            "No root occurrence found -- every occurrence is the child of some joint, "
-            "which means the joint graph has a cycle."
-        )
-    if len(roots) > 1:
-        raise ExtractionError(
-            f"Design has {len(roots)} unconnected root occurrences {sorted(roots)}; "
-            "a robot must be a single connected tree with exactly one root."
-        )
+    jointed_names = {j.occurrence_one for j in joints_info} | {j.occurrence_two for j in joints_info}
+
+    host_of_orphan: Dict[str, str] = {}
+    if jointed_names:
+        jointed_roots = [name for name in jointed_names if name not in joint_by_child]
+        if len(jointed_roots) == 0:
+            raise ExtractionError(
+                "No root occurrence found among jointed occurrences -- every jointed "
+                "occurrence is the child of some joint, which means the joint graph has a cycle."
+            )
+        if len(jointed_roots) > 1:
+            raise ExtractionError(
+                f"Design has {len(jointed_roots)} separate joint-connected mechanisms with no "
+                f"joint tying them together {sorted(jointed_roots)}; a robot must be a single "
+                "connected tree with exactly one root. (Occurrences with no joint at all are "
+                "fused onto their nearest jointed neighbor instead of counting here -- see "
+                "build_robot_model's docstring.)"
+            )
+        kept_names = jointed_names
+        orphan_names = [name for name in occurrences if name not in jointed_names]
+        jointed_occurrences = {name: occurrences[name] for name in jointed_names}
+        for orphan_name in orphan_names:
+            host_of_orphan[orphan_name] = _nearest_by_name(occurrences[orphan_name], jointed_occurrences)
+    else:
+        roots = list(occurrences)  # joint_by_child is empty -> trivially everyone
+        if len(roots) > 1:
+            raise ExtractionError(
+                f"Design has {len(roots)} unconnected root occurrences {sorted(roots)}; "
+                "a robot must be a single connected tree with exactly one root."
+            )
+        kept_names = set(occurrences)
+
+    orphans_of: Dict[str, List[str]] = {name: [] for name in kept_names}
+    for orphan_name, host_name in host_of_orphan.items():
+        orphans_of[host_name].append(orphan_name)
 
     sanitized: Dict[str, str] = {}
     for name in occurrences:
+        if name not in kept_names:
+            continue
         clean = sanitize_link_name(name)
         if clean in sanitized.values():
             raise ExtractionError(
@@ -383,13 +513,21 @@ def build_robot_model(reader: FusionDesignReader, robot_name: str) -> Robot:
         sanitized[name] = clean
 
     links: List[Link] = []
-    for name, occ in occurrences.items():
+    for name in occurrences:
+        if name not in kept_names:
+            continue
+        fused_names = orphans_of[name]
+        occ = _fuse_occurrences(occurrences[name], [occurrences[n] for n in fused_names])
         parent_joint = joint_by_child.get(name)
         parent_link = sanitized[parent_joint.occurrence_one] if parent_joint else None
         metadata: Dict[str, object] = {
             "fusion_occurrence": name,
             "fusion_body_names": list(occ.body_names),
         }
+        if fused_names:
+            # Present only when at least one unjointed occurrence was fused
+            # onto this link -- see build_robot_model's docstring.
+            metadata["fused_occurrences"] = sorted(fused_names)
         bbox_size = _bounding_box_size(occ)
         if bbox_size is not None:
             # Present only when Fusion supplied a bounding box (see

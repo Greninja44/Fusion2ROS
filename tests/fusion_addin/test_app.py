@@ -6,12 +6,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from fusion_addin.app import (
+    GenerationCancelled,
     PipelineError,
     attach_collision_proxies,
     attach_mesh_references,
     check_missing_actuator_limits,
     format_robot_summary,
     generate_ros_package,
+    robot_summary_as_dict,
     run_pipeline,
 )
 from robot_model import Actuator, Geometry, Inertial, Joint, JointType, Link, Robot
@@ -76,6 +78,48 @@ def test_format_robot_summary_no_joints():
     assert "Links (1):" in summary
     assert "Joints (0):" in summary
     assert "(none)" in summary
+
+
+def test_robot_summary_as_dict_lists_links_and_joints():
+    robot = make_simple_robot(with_limits=True)
+    summary = robot_summary_as_dict(robot)
+
+    assert summary == {
+        "links": [
+            {"name": "base_link", "parent": None, "is_root": True},
+            {"name": "arm", "parent": "base_link", "is_root": False},
+        ],
+        "joints": [
+            {"name": "joint1", "type": "revolute", "parent": "base_link", "child": "arm"},
+        ],
+    }
+
+
+def test_robot_summary_as_dict_no_joints():
+    base = Link(name="base_link", inertial=Inertial(mass=1.0, ixx=0.01, iyy=0.01, izz=0.01))
+    robot = Robot(name="lone_link_robot", links=[base], joints=[])
+
+    summary = robot_summary_as_dict(robot)
+
+    assert summary == {
+        "links": [{"name": "base_link", "parent": None, "is_root": True}],
+        "joints": [],
+    }
+
+
+def test_robot_summary_as_dict_matches_format_robot_summary_content():
+    # Not the same shape, but the same underlying facts -- every link/joint
+    # name mentioned in the plain-text summary must also appear in the
+    # structured one, and vice versa.
+    robot = make_simple_robot(with_limits=True)
+    text_summary = format_robot_summary(robot)
+    dict_summary = robot_summary_as_dict(robot)
+
+    for link in dict_summary["links"]:
+        assert link["name"] in text_summary
+    for joint in dict_summary["joints"]:
+        assert joint["name"] in text_summary
+        assert joint["type"] in text_summary
 
 
 def test_attach_mesh_references(tmp_path):
@@ -526,5 +570,145 @@ def test_run_pipeline_default_matches_pre_change_behavior(tmp_path):
     )
 
     assert _package_file_bytes(package_default) == _package_file_bytes(package_explicit)
+
+
+# ---------------------------------------------------------------------------
+# progress_callback
+# ---------------------------------------------------------------------------
+
+
+def test_progress_callback_reports_minimal_stages_for_urdf_only(tmp_path):
+    robot = make_simple_robot(with_limits=True)
+    calls = []
+
+    generate_ros_package(robot, {}, tmp_path, progress_callback=lambda *args: calls.append(args))
+
+    # 3 fixed stages when no include_* flag is set: check+mesh, URDF, write.
+    assert len(calls) == 3
+    for i, (description, step, total) in enumerate(calls, start=1):
+        assert isinstance(description, str) and description
+        assert step == i
+        assert total == 3
+
+
+def test_progress_callback_total_grows_with_include_flags(tmp_path):
+    robot = make_simple_robot(with_limits=True)
+    robot.actuators.append(Actuator(name="joint1_motor", type="electric_motor", joint="joint1", interface="position"))
+    calls = []
+
+    generate_ros_package(
+        robot,
+        {},
+        tmp_path,
+        include_ros2_control=True,
+        include_moveit=True,
+        progress_callback=lambda *args: calls.append(args),
+    )
+
+    # 3 fixed stages + ros2_control + moveit = 5, and every call must agree
+    # on the same total (it's fixed for the whole call, computed up front).
+    assert len(calls) == 5
+    totals = {total for _, _, total in calls}
+    assert totals == {5}
+    steps = [step for _, step, _ in calls]
+    assert steps == [1, 2, 3, 4, 5]
+
+
+def test_progress_callback_includes_sensor_stage_only_when_sensors_present(tmp_path):
+    from robot_model import Sensor
+
+    robot = make_simple_robot(with_limits=True)
+    robot.sensors.append(Sensor(name="cam1", type="camera", parent_link="arm"))
+    calls = []
+
+    generate_ros_package(robot, {}, tmp_path, include_gazebo=True, progress_callback=lambda *args: calls.append(args))
+
+    # 3 fixed stages + gazebo + sensors = 5.
+    assert len(calls) == 5
+    descriptions = [d for d, _, _ in calls]
+    assert any("sensor" in d.lower() for d in descriptions)
+
+
+def test_progress_callback_not_called_past_the_failure_point(tmp_path):
+    # A PipelineError (missing actuator limits) is raised inside the very
+    # first stage -- the callback sees that one stage announced (it reports
+    # "starting", not "succeeded") and no more; later stages (URDF
+    # generation, write-to-disk) must never be reported since they never run.
+    robot = make_simple_robot(with_limits=False)
+    calls = []
+
+    with pytest.raises(PipelineError):
+        generate_ros_package(robot, {}, tmp_path, progress_callback=lambda *args: calls.append(args))
+
+    assert len(calls) == 1
+    assert calls[0][1:] == (1, 3)
+
+
+# ---------------------------------------------------------------------------
+# should_cancel
+# ---------------------------------------------------------------------------
+
+
+def test_should_cancel_stops_generation_immediately(tmp_path):
+    robot = make_simple_robot(with_limits=True)
+    calls = []
+
+    with pytest.raises(GenerationCancelled):
+        generate_ros_package(
+            robot,
+            {},
+            tmp_path,
+            progress_callback=lambda *args: calls.append(args),
+            should_cancel=lambda: True,
+        )
+
+    # Cancelled right after the very first stage is reported -- no package
+    # should have been written at all.
+    assert len(calls) == 1
+    assert not (tmp_path / robot.name).exists()
+
+
+def test_should_cancel_partway_through_stops_before_later_stages(tmp_path):
+    robot = make_simple_robot(with_limits=True)
+    robot.actuators.append(Actuator(name="joint1_motor", type="electric_motor", joint="joint1", interface="position"))
+    calls = []
+
+    # should_cancel is checked immediately after progress_callback at every
+    # stage checkpoint, so it sees the just-appended call for that same
+    # stage -- returning True once 2 stages have been reported cancels right
+    # after "Generating URDF/Xacro" (the 2nd stage), before the
+    # ros2_control-specific stage (or writing to disk) ever runs.
+    def cancel_after_two():
+        return len(calls) >= 2
+
+    with pytest.raises(GenerationCancelled):
+        generate_ros_package(
+            robot,
+            {},
+            tmp_path,
+            include_ros2_control=True,
+            progress_callback=lambda *args: calls.append(args),
+            should_cancel=cancel_after_two,
+        )
+
+    assert len(calls) == 2
+    assert calls[0][0] == "Checking actuator limits and attaching mesh/collision geometry"
+    assert calls[1][0] == "Generating URDF/Xacro"
+    assert not (tmp_path / robot.name).exists()
+
+
+def test_should_cancel_never_called_when_absent_default_behavior_unchanged(tmp_path):
+    # Omitting should_cancel entirely must behave exactly as before this
+    # parameter existed -- generation runs to completion.
+    robot = make_simple_robot(with_limits=True)
+    package_dir = generate_ros_package(robot, {}, tmp_path)
+    assert package_dir == tmp_path / "app_test_robot"
+    assert (package_dir / "package.xml").exists()
+
+
+def test_should_cancel_false_lets_generation_complete(tmp_path):
+    robot = make_simple_robot(with_limits=True)
+    package_dir = generate_ros_package(robot, {}, tmp_path, should_cancel=lambda: False)
+    assert (package_dir / "package.xml").exists()
 
 

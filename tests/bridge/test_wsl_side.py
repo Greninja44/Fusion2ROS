@@ -1,6 +1,7 @@
-"""Tests for bridge.wsl_side (build.py). Covers ONLY the WSL-side half of
-the bridge -- bridge.windows is untestable from inside WSL (see its module
-docstrings) and deliberately has no tests here.
+"""Tests for bridge.wsl_side (build.py). Covers the WSL-side half of the
+bridge -- see tests/bridge/test_windows_invoke.py for the Windows-side half
+(bridge.windows), which -- despite what this file used to claim -- turns
+out to be genuinely testable from inside WSL too, via real wsl.exe interop.
 
 Must run with plain `python3 -m pytest` like the rest of tests/. The
 colcon_build integration tests are real (no mocking): they build a genuine
@@ -167,6 +168,66 @@ def test_colcon_build_succeeds_on_valid_package(tmp_path):
     assert isinstance(result, BuildResult)
     assert result.returncode == 0
     assert result.success is True
+
+
+@requires_colcon
+def test_colcon_build_streams_output_line_by_line(tmp_path):
+    # on_output_line switches colcon_build from subprocess.run() to a
+    # threaded Popen -- confirm that path produces an equivalent
+    # BuildResult AND actually invokes the callback with real build output
+    # while the process is running, not just after it's done.
+    ros_ws = tmp_path / "throwaway_ws"
+    make_ament_cmake_package(ros_ws, "fake_pkg_stream", valid=True)
+
+    lines = []
+    result = colcon_build(
+        ros_ws, "fake_pkg_stream", ros_setup=ROS_SETUP, timeout=120, on_output_line=lines.append
+    )
+
+    assert isinstance(result, BuildResult)
+    assert result.success is True
+    assert result.returncode == 0
+    assert len(lines) > 0
+    # Every line handed to the callback must also appear in the final
+    # captured stdout/stderr -- streaming must not lose or duplicate output
+    # relative to what the non-streaming path would have captured.
+    combined = result.stdout + result.stderr
+    for line in lines:
+        assert line in combined
+
+
+@requires_colcon
+def test_colcon_build_streaming_reports_failure_equivalently(tmp_path):
+    ros_ws = tmp_path / "throwaway_ws"
+    make_ament_cmake_package(ros_ws, "fake_pkg_stream_bad", valid=False)
+
+    lines = []
+    result = colcon_build(
+        ros_ws, "fake_pkg_stream_bad", ros_setup=ROS_SETUP, timeout=120, on_output_line=lines.append
+    )
+
+    assert result.success is False
+    assert result.returncode != 0
+    assert result.stderr.strip() != ""
+    assert len(lines) > 0
+
+
+def test_colcon_build_streaming_reports_launch_failure(tmp_path, monkeypatch):
+    # Force the Popen-based path's OSError branch without needing a real
+    # colcon/ROS install -- patch subprocess.Popen to simulate a missing
+    # bash/colcon binary.
+    import subprocess as subprocess_module
+
+    def _raise_oserror(*args, **kwargs):
+        raise OSError("no such file or directory: bash")
+
+    monkeypatch.setattr(subprocess_module, "Popen", _raise_oserror)
+
+    result = colcon_build(tmp_path, "whatever", on_output_line=lambda line: None)
+
+    assert result.success is False
+    assert result.returncode == -1
+    assert "failed to launch build" in result.stderr
 
 
 @requires_colcon

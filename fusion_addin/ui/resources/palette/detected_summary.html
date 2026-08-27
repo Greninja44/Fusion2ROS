@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<!--
+  Fusion2ROS "Detected Links/Joints" palette.
+
+  Loaded by fusion_addin/ui/command.py via adsk.core.Palettes.add(...) as a
+  richer alternative to the "Generate ROS 2 Package" dialog's plain-text
+  TextBoxCommandInput (see command.py's PALETTE_HTML_PATH / _get_or_create_
+  palette). Renders the SAME underlying data as app.format_robot_summary
+  (fed here as structured JSON from app.robot_summary_as_dict instead of
+  pre-formatted text) as an actual two-section tree with real styling,
+  matching the original project mockup's
+  "Detected Links [check] base_link [check] link1..." /
+  "Detected Joints [check] joint1 -- Revolute..." look, which a plain
+  TextBoxCommandInput cannot render (it's fixed-width monospace text only).
+
+  No external resources, no CDNs, no frameworks -- everything is inline,
+  since Fusion's embedded web view may have no internet access (matches the
+  approach in Autodesk's own Palette Sample add-in). Vanilla JS only.
+
+  Python <-> HTML wiring (see command.py's PaletteHTMLEventHandler /
+  _push_summary_to_palette for the Python side):
+    Python -> HTML:  Palette.sendInfoToHTML("update", <json>) delivers here
+                      via window.fusionJavaScriptHandler.handle(action, data)
+                      (the documented receive-side hook for BOTH Fusion web
+                      view generations -- see Palettes_UM.htm).
+    HTML -> Python:   adsk.fusionSendData(action, data) sends a "ready" event
+                      once this page has finished loading, so Python knows
+                      it's safe to push data (a sendInfoToHTML call made
+                      before this page registers its handler has nowhere to
+                      land). Old (CEF) browser: synchronous return value.
+                      New (Qt) browser: returns a Promise. Both are handled
+                      below without branching on which one is active.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fusion2ROS: Detected Links/Joints</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f6f8;
+    --panel-bg: #ffffff;
+    --text: #1f2430;
+    --text-muted: #6b7280;
+    --border: #e2e5eb;
+    --accent: #2f6fed;
+    --check: #1a8a4a;
+    --badge-root-bg: #e6f4ea;
+    --badge-root-fg: #1a7a3d;
+    --badge-parent-bg: #eef0f4;
+    --badge-parent-fg: #4b5563;
+    --badge-type-bg: #eaf0ff;
+    --badge-type-fg: #2f57c9;
+    --error-bg: #fdecec;
+    --error-fg: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1e22;
+      --panel-bg: #24272c;
+      --text: #e8eaed;
+      --text-muted: #9aa0a6;
+      --border: #33363c;
+      --accent: #6ea1ff;
+      --check: #4fd07f;
+      --badge-root-bg: #163524;
+      --badge-root-fg: #6fe0a0;
+      --badge-parent-bg: #2c2f36;
+      --badge-parent-fg: #b7bcc4;
+      --badge-type-bg: #1e2a44;
+      --badge-type-fg: #9db8ff;
+      --error-bg: #3a1f1f;
+      --error-fg: #ff9a92;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+    font-size: 13px;
+  }
+  #root { padding: 10px 12px 16px; }
+  .section {
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .section-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-header h2 {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .count {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  ul.tree {
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+  }
+  ul.tree li.row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  ul.tree li.row:last-child { border-bottom: none; }
+  .check {
+    color: var(--check);
+    font-weight: 700;
+    width: 1em;
+    flex: 0 0 auto;
+  }
+  .name {
+    font-weight: 600;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  .edge {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-left: auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .badge {
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .badge-root { background: var(--badge-root-bg); color: var(--badge-root-fg); }
+  .badge-parent { background: var(--badge-parent-bg); color: var(--badge-parent-fg); }
+  .badge-type { background: var(--badge-type-bg); color: var(--badge-type-fg); }
+  li.empty-row, li.error-row {
+    padding: 8px 12px;
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  li.error-row {
+    background: var(--error-bg);
+    color: var(--error-fg);
+    font-style: normal;
+  }
+  #status {
+    font-size: 11px;
+    color: var(--text-muted);
+    padding: 0 2px 6px;
+  }
+</style>
+</head>
+<body>
+
+<div id="root">
+  <div id="status">Waiting for detection results&hellip;</div>
+
+  <div class="section">
+    <div class="section-header">
+      <h2>Detected Links</h2>
+      <span class="count"><span id="links-count">0</span></span>
+    </div>
+    <ul class="tree" id="links-tree"></ul>
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <h2>Detected Joints</h2>
+      <span class="count"><span id="joints-count">0</span></span>
+    </div>
+    <ul class="tree" id="joints-tree"></ul>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  function escapeHtml(value) {
+    return String(value === null || value === undefined ? "" : value).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function render(summary) {
+    var status = document.getElementById("status");
+    var linksTree = document.getElementById("links-tree");
+    var jointsTree = document.getElementById("joints-tree");
+    var linksCount = document.getElementById("links-count");
+    var jointsCount = document.getElementById("joints-count");
+
+    linksTree.innerHTML = "";
+    jointsTree.innerHTML = "";
+
+    var links = (summary && summary.links) || [];
+    var joints = (summary && summary.joints) || [];
+    linksCount.textContent = String(links.length);
+    jointsCount.textContent = String(joints.length);
+
+    if (summary && summary.error) {
+      status.textContent = "Could not detect links/joints yet: " + summary.error;
+    } else {
+      status.textContent = "Live readback from the current design / root-occurrence selection.";
+    }
+
+    if (links.length === 0) {
+      var emptyLinks = document.createElement("li");
+      emptyLinks.className = "empty-row";
+      emptyLinks.textContent = "(none detected)";
+      linksTree.appendChild(emptyLinks);
+    } else {
+      links.forEach(function (link) {
+        var li = document.createElement("li");
+        li.className = "row";
+        var badgeHtml = link.is_root
+          ? '<span class="badge badge-root">root</span>'
+          : '<span class="badge badge-parent">parent: ' + escapeHtml(link.parent) + "</span>";
+        li.innerHTML =
+          '<span class="check">&#10003;</span>' +
+          '<span class="name">' + escapeHtml(link.name) + "</span>" +
+          badgeHtml;
+        linksTree.appendChild(li);
+      });
+    }
+
+    if (joints.length === 0) {
+      var emptyJoints = document.createElement("li");
+      emptyJoints.className = "empty-row";
+      emptyJoints.textContent = "(none detected)";
+      jointsTree.appendChild(emptyJoints);
+    } else {
+      joints.forEach(function (joint) {
+        var li = document.createElement("li");
+        li.className = "row";
+        li.innerHTML =
+          '<span class="check">&#10003;</span>' +
+          '<span class="name">' + escapeHtml(joint.name) + "</span>" +
+          '<span class="badge badge-type">' + escapeHtml(joint.type) + "</span>" +
+          '<span class="edge">' + escapeHtml(joint.parent) + " &rarr; " + escapeHtml(joint.child) + "</span>";
+        jointsTree.appendChild(li);
+      });
+    }
+  }
+
+  // Receive side, for BOTH Fusion web-view generations: Fusion calls
+  // window.fusionJavaScriptHandler.handle(action, data) in response to the
+  // add-in's palette.sendInfoToHTML(action, data) call. Must return a
+  // non-empty string -- an empty return is interpreted by Fusion as failure.
+  window.fusionJavaScriptHandler = {
+    handle: function (action, data) {
+      try {
+        if (action === "update") {
+          render(JSON.parse(data));
+          return "OK";
+        }
+        return "OK";
+      } catch (e) {
+        return "FAILED";
+      }
+    }
+  };
+
+  // Send side: tell the add-in this page has finished loading and is ready
+  // to receive "update" -- avoids a race where the add-in's initial
+  // sendInfoToHTML call fires before this script has registered the handler
+  // above. The add-in's PaletteHTMLEventHandler (command.py) reacts to this
+  // exact action by (re-)sending the latest known summary.
+  //
+  // REAL BUG FOUND AND FIXED HERE: `window.adsk` is injected into the page
+  // asynchronously by Fusion's web view and is NOT guaranteed to exist yet
+  // at DOMContentLoaded. The original version of this function silently
+  // gave up the very first time that race was lost, with no retry -- so
+  // "ready" was never sent, the add-in's one-time initial sendInfoToHTML
+  // push (sent immediately after palette creation, almost certainly before
+  // this page had even started loading) had nowhere to land, and this
+  // page's own static placeholder markup (see the #status/#links-tree/
+  // #joints-tree "(none detected)"/"Waiting for detection results..."
+  // initial content above) stayed showing FOREVER -- even once the Python
+  // side had already computed a real (or correctly-empty) result -- unless
+  // the user happened to change the root-occurrence selection again, which
+  // is the only other thing that re-triggers a push. Retrying with a capped
+  // backoff instead of giving up on the first miss fixes this.
+  function signalReady(attempt) {
+    attempt = attempt || 0;
+    if (!window.adsk || typeof window.adsk.fusionSendData !== "function") {
+      if (attempt < 50) {  // ~10s of retries at 200ms -- generous, still bounded
+        setTimeout(function () { signalReady(attempt + 1); }, 200);
+      }
+      return;
+    }
+    try {
+      var result = window.adsk.fusionSendData("ready", "");
+      // New (Qt) web view: fusionSendData returns a Promise. Old (CEF) web
+      // view: it returns the value synchronously. Only the former has
+      // anything to await; both are safe to leave unhandled otherwise.
+      if (result && typeof result.catch === "function") {
+        result.catch(function () { /* no-op: next refresh will retry anyway */ });
+      }
+    } catch (e) {
+      if (attempt < 50) {
+        setTimeout(function () { signalReady(attempt + 1); }, 200);
+      }
+    }
+  }
+
+  if (document.readyState === "complete" || document.readyState === "interactive") {
+    signalReady();
+  } else {
+    document.addEventListener("DOMContentLoaded", signalReady);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+[0.019s] Invoking command in '/home/batman/Fusion2ROS/build/sample_rover': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake /home/batman/Fusion2ROS/output/sample_rover -DCMAKE_INSTALL_PREFIX=/home/batman/Fusion2ROS/install/sample_rover
+[0.281s] -- The C compiler identification is GNU 15.2.0
+[1.533s] -- The CXX compiler identification is GNU 15.2.0
+[2.286s] -- Detecting C compiler ABI info
+[2.563s] -- Detecting C compiler ABI info - done
+[2.586s] -- Check for working C compiler: /usr/bin/cc - skipped
+[2.587s] -- Detecting C compile features
+[2.587s] -- Detecting C compile features - done
+[2.605s] -- Detecting CXX compiler ABI info
+[2.881s] -- Detecting CXX compiler ABI info - done
+[2.898s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[2.898s] -- Detecting CXX compile features
+[2.899s] -- Detecting CXX compile features - done
+[2.914s] -- Found ament_cmake: 2.8.7 (/opt/ros/lyrical/share/ament_cmake/cmake)
+[3.651s] -- Configuring done (3.6s)
+[3.660s] -- Generating done (0.0s)
+[3.665s] -- Build files have been written to: /home/batman/Fusion2ROS/build/sample_rover
+[3.670s] Invoked command in '/home/batman/Fusion2ROS/build/sample_rover' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake /home/batman/Fusion2ROS/output/sample_rover -DCMAKE_INSTALL_PREFIX=/home/batman/Fusion2ROS/install/sample_rover
+[3.673s] Invoking command in '/home/batman/Fusion2ROS/build/sample_rover': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake --build /home/batman/Fusion2ROS/build/sample_rover -- -j12 -l12
+[3.720s] Invoked command in '/home/batman/Fusion2ROS/build/sample_rover' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake --build /home/batman/Fusion2ROS/build/sample_rover -- -j12 -l12
+[3.733s] Invoking command in '/home/batman/Fusion2ROS/build/sample_rover': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake --install /home/batman/Fusion2ROS/build/sample_rover
+[3.742s] -- Install configuration: ""
+[3.742s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/config
+[3.744s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/config/map.yaml
+[3.744s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/config/controllers.yaml
+[3.745s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/config/nav2_params.yaml
+[3.745s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/launch
+[3.745s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/launch/control.launch.py
+[3.746s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/launch/nav2_bringup.launch.py
+[3.746s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/launch/gazebo.launch.py
+[3.746s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/launch/display.launch.py
+[3.746s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/meshes
+[3.746s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/rviz
+[3.746s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/rviz/sample_rover.rviz
+[3.747s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/urdf
+[3.747s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/urdf/sample_rover.urdf.xacro
+[3.747s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/worlds
+[3.747s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/worlds/empty.sdf
+[3.751s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/ament_index/resource_index/package_run_dependencies/sample_rover
+[3.751s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/ament_index/resource_index/parent_prefix_path/sample_rover
+[3.751s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/environment/ament_prefix_path.sh
+[3.752s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/environment/ament_prefix_path.dsv
+[3.752s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/environment/path.sh
+[3.752s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/environment/path.dsv
+[3.752s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/local_setup.bash
+[3.752s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/local_setup.fish
+[3.752s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/local_setup.sh
+[3.753s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/local_setup.zsh
+[3.753s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/local_setup.dsv
+[3.753s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/package.dsv
+[3.753s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/ament_index/resource_index/packages/sample_rover
+[3.754s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/cmake/sample_roverConfig.cmake
+[3.754s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/cmake/sample_roverConfig-version.cmake
+[3.754s] -- Installing: /home/batman/Fusion2ROS/install/sample_rover/share/sample_rover/package.xml
+[3.758s] Invoked command in '/home/batman/Fusion2ROS/build/sample_rover' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/batman/ros2_ws/install/gz_sim_demo:/home/batman/ros2_ws/install/field_rover_vision:/home/batman/ros2_ws/install/field_rover_hw:/home/batman/ros2_ws/install/field_rover_coverage:/home/batman/ros2_ws/install/field_rover_battery:/home/batman/ros2_ws/install/field_rover_nav:/home/batman/ros2_ws/install/field_rover_safety:/home/batman/ros2_ws/install/field_rover_mission:/home/batman/ros2_ws/install/field_rover_dashboard:/home/batman/ros2_ws/install/field_rover_explore:/opt/ros/lyrical DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake --install /home/batman/Fusion2ROS/build/sample_rover

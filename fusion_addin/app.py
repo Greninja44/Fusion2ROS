@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
+
+ProgressCallback = Callable[[str, int, int], None]
+CancelCheck = Callable[[], bool]
 
 from robot_model import Robot, JointType
 
@@ -27,6 +30,15 @@ class PipelineError(Exception):
     """Raised for a clear, actionable, pre-generation problem (e.g. a joint
     missing the motor limits URDF requires) -- distinct from a bug, this is
     expected user-facing input the caller should display, not a traceback."""
+
+
+class GenerationCancelled(Exception):
+    """Raised by generate_ros_package when `should_cancel()` returns True at
+    one of its `_report()` checkpoints (see that parameter's docstring).
+    Deliberately NOT a PipelineError: a PipelineError means "your input is
+    wrong, fix it and try again"; this means "you asked to stop, and we did"
+    -- a caller (ui/command.py's ProgressDialog integration) should treat it
+    as a clean, silent abort, not show a traceback or an error dialog."""
 
 
 def build_robot_from_reader(reader: FusionDesignReader, robot_name: str) -> Robot:
@@ -173,6 +185,39 @@ def format_robot_summary(robot: Robot) -> str:
     return "\n".join(lines)
 
 
+def robot_summary_as_dict(robot: Robot) -> dict:
+    """Structured (not pre-formatted) equivalent of format_robot_summary,
+    same underlying information, for UI surfaces that can render a real tree
+    instead of a plain-text box -- specifically the Palette-based "Detected
+    Links/Joints" view in ui/command.py (see that module's
+    detected_summary.html), which renders this straight to HTML/JS via JSON
+    over Palette.sendInfoToHTML. Kept as a separate function rather than
+    having format_robot_summary build on it (or vice versa) so the existing
+    plain-text CLI/log path (format_robot_summary) is untouched byte-for-byte.
+
+    Fusion-symbol-free, pure formatting of an already-built Robot -- unit
+    tested directly with a hand-built Robot fixture, same as
+    format_robot_summary.
+
+    Shape:
+        {
+            "links": [{"name": str, "parent": str | None, "is_root": bool}, ...],
+            "joints": [{"name": str, "type": str, "parent": str, "child": str}, ...],
+        }
+    `type` is the joint's JointType.value string (e.g. "revolute"), matching
+    format_robot_summary's `[{joint.type.value}]` rendering.
+    """
+    return {
+        "links": [
+            {"name": link.name, "parent": link.parent, "is_root": link.parent is None} for link in robot.links
+        ],
+        "joints": [
+            {"name": joint.name, "type": joint.type.value, "parent": joint.parent, "child": joint.child}
+            for joint in robot.joints
+        ],
+    }
+
+
 def generate_ros_package(
     robot: Robot,
     mesh_files: Dict[str, Path],
@@ -183,6 +228,8 @@ def generate_ros_package(
     include_nav2: bool = False,
     moveit_group_name: str = "arm",
     use_bounding_box_collision: bool = False,
+    progress_callback: Optional[ProgressCallback] = None,
+    should_cancel: Optional[CancelCheck] = None,
 ) -> Path:
     """robot -> URDF/Xacro text -> full ROS 2 package tree under
     output_dir/<robot.name>/. Raises PipelineError (not a bare ValueError)
@@ -200,7 +247,57 @@ def generate_ros_package(
     are attached, replace collision_geometry with a simplified bounding-box
     proxy for links that have one available (see attach_collision_proxies).
     Left False, output is byte-identical to before this parameter existed.
+
+    progress_callback (default None, opt-in): if given, called as
+    `callback(stage_description, step_number, total_steps)` once per stage
+    (1-indexed step_number, `total_steps` fixed for the whole call and
+    computed up front from which include_* flags are set, so a caller can
+    render a determinate progress bar rather than a spinner). Exists so the
+    Fusion UI can drive a real adsk.core.ProgressDialog during generation
+    instead of appearing to hang (generation of a complex robot with many
+    optional outputs is not instantaneous), and so the standalone CLI
+    (scripts/generate_from_json.py) can print progress for a large batch.
+    Never called with a partially-failed stage -- if a stage raises, this
+    function raises too, mid-callback-sequence, exactly where the error
+    actually occurred.
+
+    should_cancel (default None, opt-in): if given, called with no arguments
+    at every stage checkpoint (right after progress_callback, before that
+    stage's work begins) -- if it returns truthy, generation stops
+    immediately by raising GenerationCancelled instead of proceeding.
+    Cooperative, not preemptive: this only checks between stages (URDF
+    generation, one generator's config, writing to disk), never mid-stage,
+    since none of those individual steps are themselves interruptible. Exists
+    so the Fusion UI can wire a real ProgressDialog's `wasCancelled` into
+    an actual, working cancel -- passing this without also passing
+    progress_callback is legal but pointless, since there'd be no UI moment
+    for a user to have clicked cancel from.
     """
+    total_steps = 3  # validate+mesh, URDF, write-to-disk -- always present
+    if include_ros2_control:
+        total_steps += 1
+    if include_gazebo:
+        total_steps += 1
+        if robot.sensors:
+            total_steps += 1
+    if include_moveit:
+        total_steps += 1
+    if include_nav2:
+        total_steps += 1
+
+    step = 0
+
+    def _report(stage_description: str) -> None:
+        nonlocal step
+        step += 1
+        if progress_callback is not None:
+            progress_callback(stage_description, step, total_steps)
+        if should_cancel is not None and should_cancel():
+            raise GenerationCancelled(
+                f"Generation cancelled before stage {step}/{total_steps} ({stage_description!r})"
+            )
+
+    _report("Checking actuator limits and attaching mesh/collision geometry")
     problems = check_missing_actuator_limits(robot)
     if problems:
         raise PipelineError(
@@ -211,12 +308,15 @@ def generate_ros_package(
 
     attach_mesh_references(robot, mesh_files)
     attach_collision_proxies(robot, use_bounding_box_collision)
+
+    _report("Generating URDF/Xacro")
     urdf_xacro = generate_urdf_xacro(robot)
 
     fragments: List[str] = []
     extra_files: Dict[str, str] = {}
 
     if include_ros2_control:
+        _report("Generating ros2_control configuration")
         from .generators.ros2_control import (
             generate_control_launch,
             generate_controllers_yaml,
@@ -228,6 +328,7 @@ def generate_ros_package(
         extra_files["launch/control.launch.py"] = generate_control_launch(robot)
 
     if include_gazebo:
+        _report("Generating Gazebo Sim configuration")
         from .generators.gazebo import generate_gazebo_xml, generate_spawn_launch, generate_world_sdf
 
         fragments.append(generate_gazebo_xml(robot))
@@ -235,12 +336,14 @@ def generate_ros_package(
         extra_files["launch/gazebo.launch.py"] = generate_spawn_launch(robot)
 
         if robot.sensors:
+            _report("Generating sensor configuration")
             from .generators.sensors import generate_ros_gz_bridge_yaml, generate_sensor_gazebo_xml
 
             fragments.append(generate_sensor_gazebo_xml(robot))
             extra_files["config/ros_gz_bridge.yaml"] = generate_ros_gz_bridge_yaml(robot)
 
     if include_moveit:
+        _report("Generating MoveIt 2 configuration")
         from .generators.moveit import (
             detect_moveit_suitability,
             generate_joint_limits_yaml,
@@ -274,6 +377,7 @@ def generate_ros_package(
         )
 
     if include_nav2:
+        _report("Generating Nav2 configuration")
         from .generators.nav2 import (
             detect_nav2_suitability,
             generate_map_yaml_stub,
@@ -291,6 +395,7 @@ def generate_ros_package(
     if fragments:
         urdf_xacro = splice_xml_fragments(urdf_xacro, fragments)
 
+    _report("Writing ROS 2 package to disk")
     # mesh_files here is keyed by link name (export_link_meshes' contract);
     # generate_package wants it keyed by the mesh's relative filename inside
     # the package (its own, independent contract) -- re-key at this boundary

@@ -1,0 +1,49 @@
+-- The C compiler identification is GNU 15.2.0
+-- The CXX compiler identification is GNU 15.2.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Found ament_cmake: 2.8.7 (/opt/ros/lyrical/share/ament_cmake/cmake)
+-- Configuring done (3.7s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/batman/Fusion2ROS/build/sample_arm
+-- Install configuration: ""
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/kinematics.yaml
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/sample_arm.srdf
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/moveit_controllers.yaml
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/controllers.yaml
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/ompl_planning.yaml
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/config/joint_limits.yaml
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/launch
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/launch/control.launch.py
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/launch/moveit_demo.launch.py
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/launch/display.launch.py
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/meshes
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/rviz
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/rviz/sample_arm.rviz
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/urdf
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/urdf/sample_arm.urdf.xacro
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/ament_index/resource_index/package_run_dependencies/sample_arm
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/ament_index/resource_index/parent_prefix_path/sample_arm
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/environment/ament_prefix_path.sh
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/environment/ament_prefix_path.dsv
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/environment/path.sh
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/environment/path.dsv
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/local_setup.bash
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/local_setup.fish
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/local_setup.sh
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/local_setup.zsh
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/local_setup.dsv
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/package.dsv
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/ament_index/resource_index/packages/sample_arm
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/cmake/sample_armConfig.cmake
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/cmake/sample_armConfig-version.cmake
+-- Installing: /home/batman/Fusion2ROS/install/sample_arm/share/sample_arm/package.xml
