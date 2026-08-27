@@ -136,6 +136,25 @@ def test_package_xml_is_well_formed_and_has_required_fields(tmp_path):
     assert "lyrical" not in raw_text.lower()
 
 
+def test_extra_depends_are_added_without_duplicating_base_set(tmp_path):
+    # Real gap found while adding Gazebo support: package.xml never declared
+    # ros_gz_sim/ros_gz_bridge regardless of include_gazebo, since the
+    # <depend> list was entirely hardcoded -- extra_depends closes that.
+    robot = make_demo_robot()
+    pkg_dir = generate_package(
+        robot,
+        TRIVIAL_URDF_XACRO,
+        {},
+        tmp_path,
+        extra_depends=["ros_gz_sim", "ros_gz_bridge", "xacro"],  # "xacro" duplicates the base set
+    )
+
+    depends = [el.text for el in ET.parse(pkg_dir / "package.xml").getroot().findall("depend")]
+    assert depends.count("xacro") == 1
+    assert "ros_gz_sim" in depends
+    assert "ros_gz_bridge" in depends
+
+
 def test_generate_package_is_idempotent_and_clears_stale_meshes(tmp_path):
     robot = make_demo_robot()
 

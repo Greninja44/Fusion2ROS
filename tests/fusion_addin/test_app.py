@@ -385,6 +385,64 @@ def test_generate_ros_package_with_gazebo(tmp_path):
     assert "<gazebo" in urdf_text
     assert "gazebo_fragment" not in urdf_text  # wrapper must be unwrapped, not leaked into the URDF
 
+    # Real gap found while adding Gazebo support: package.xml never declared
+    # ros_gz_sim/ros_gz_bridge/gz_ros2_control regardless of include_gazebo.
+    import xml.etree.ElementTree as ET
+
+    depends = {el.text for el in ET.parse(package_dir / "package.xml").getroot().findall("depend")}
+    assert {"ros_gz_sim", "ros_gz_bridge", "gz_ros2_control"} <= depends
+
+    # joint1 is a non-fixed (revolute) joint -> JointStatePublisher plugin +
+    # a joint_states bridge entry, independent of drivetrain type.
+    assert "JointStatePublisher" in urdf_text
+    bridge_yaml = (package_dir / "config" / "ros_gz_bridge.yaml").read_text()
+    assert "joint_states" in bridge_yaml
+
+
+@pytest.mark.skipif(
+    shutil.which("gz") is None or not Path("/opt/ros/lyrical/setup.bash").is_file(),
+    reason="colcon/gz-sim and/or /opt/ros/lyrical/setup.bash not available in this environment",
+)
+def test_generate_ros_package_diff_drive_gazebo_builds_and_spawns_without_gz_ros2_control_crash(tmp_path):
+    """End-to-end reproduction of the real fix: a differential-drive robot's
+    Gazebo package must use the native DiffDrive plugin (not the
+    gz_ros2_control plugin, confirmed to SIGSEGV on this machine's gz-sim
+    10.4.0 -- docs/ARCHITECTURE.md's "Gazebo" section) -- build the full
+    generated package with colcon and spawn it for real, headlessly."""
+    robot = make_diff_drive_robot()
+    package_dir = generate_ros_package(robot, {}, tmp_path, include_gazebo=True)
+
+    urdf_text = (package_dir / "urdf" / f"{robot.name}.urdf.xacro").read_text()
+    assert "gz-sim-diff-drive-system" in urdf_text
+    assert "libgz_ros2_control-system.so" not in urdf_text
+
+    ws_dir = tmp_path / "colcon_ws"
+    src_dir = ws_dir / "src" / robot.name
+    src_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(package_dir, src_dir)
+
+    build_cmd = f"source /opt/ros/lyrical/setup.bash && cd {ws_dir} && colcon build --packages-select {robot.name}"
+    build_result = subprocess.run(["bash", "-lc", build_cmd], capture_output=True, text=True, timeout=300)
+    assert build_result.returncode == 0, (
+        f"colcon build failed (rc={build_result.returncode})\n"
+        f"--- stdout ---\n{build_result.stdout}\n--- stderr ---\n{build_result.stderr}"
+    )
+
+    launch_cmd = (
+        f"source /opt/ros/lyrical/setup.bash && source {ws_dir}/install/setup.bash && "
+        f"timeout 25 ros2 launch {robot.name} gazebo.launch.py"
+    )
+    launch_result = subprocess.run(["bash", "-lc", launch_cmd], capture_output=True, text=True, timeout=60)
+    combined_output = launch_result.stdout + launch_result.stderr
+    # `timeout 25` kills the (still-running, GUI-less-headless-or-not) launch
+    # after 25s -- SIGTERM (rc 124 from `timeout`, or the negative signal
+    # number if a child propagates it) is the expected "it was still running
+    # and got killed" outcome, not a real failure; only a crash-shaped early
+    # exit or a segfault message means the fix regressed.
+    assert "Segmentation fault" not in combined_output
+    assert "GazeboSimROS2ControlPlugin" not in combined_output
+    assert "Entity creation successful" in combined_output, combined_output
+
 
 def test_generate_ros_package_with_gazebo_and_sensors(tmp_path):
     from robot_model import Sensor
@@ -414,17 +472,25 @@ def test_generate_ros_package_with_gazebo_and_sensors(tmp_path):
     assert "/base_imu" in ros_topics
 
 
-def test_generate_ros_package_with_gazebo_no_sensors_skips_bridge_yaml(tmp_path):
-    # include_gazebo=True but robot.sensors is empty -> no sensor XML/bridge
-    # config generated at all (not merely empty ones) -- matches the
-    # "robot.sensors non-empty" gate in generate_ros_package's include_gazebo
-    # block.
+def test_generate_ros_package_with_gazebo_no_sensors_skips_sensor_gazebo_xml(tmp_path):
+    # include_gazebo=True but robot.sensors is empty -> no sensor-specific
+    # <gazebo> XML generated at all -- matches the "robot.sensors non-empty"
+    # gate in generate_ros_package's include_gazebo block. The bridge config
+    # DOES still get written, for the unrelated joint_states bridge every
+    # gazebo-generated robot with a non-fixed joint gets (see gazebo.py's
+    # generate_gazebo_ros_bridge_yaml) -- sensors and joint_states are
+    # independent reasons to need a bridge file.
     robot = make_simple_robot(with_limits=True)
     assert robot.sensors == []
 
     package_dir = generate_ros_package(robot, {}, tmp_path, include_gazebo=True)
 
-    assert not (package_dir / "config" / "ros_gz_bridge.yaml").exists()
+    bridge_yaml_path = package_dir / "config" / "ros_gz_bridge.yaml"
+    assert bridge_yaml_path.exists()
+    import yaml
+
+    entries = yaml.safe_load(bridge_yaml_path.read_text())
+    assert [e["ros_topic_name"] for e in entries] == ["joint_states"]
 
 
 def test_generate_ros_package_with_ros2_control_and_gazebo_both_splice(tmp_path):

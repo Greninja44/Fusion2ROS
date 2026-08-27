@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 from robot_model import Robot
 
@@ -34,6 +34,7 @@ def generate_package(
     mesh_files: Dict[str, MeshSource],
     output_dir: Path,
     extra_files: Optional[Dict[str, FileContent]] = None,
+    extra_depends: Optional[List[str]] = None,
 ) -> Path:
     """Write a complete ROS 2 package tree for ``robot`` under ``output_dir``.
 
@@ -51,6 +52,18 @@ def generate_package(
     integration point the ros2_control/Gazebo/MoveIt/Nav2 generators plug
     into: each of those produces plain XML/YAML/launch text, and this is
     where it actually lands on disk as part of one coherent package.
+
+    ``extra_depends`` (default None) adds extra ``<depend>`` lines to
+    ``package.xml`` beyond the fixed base set (``urdf``, ``xacro``,
+    ``robot_state_publisher``, etc.) -- real gap found while adding Gazebo
+    support: this list was previously hardcoded regardless of which
+    ``include_*`` flags were used, so a Gazebo/Nav2/MoveIt-enabled package's
+    ``package.xml`` never declared ``ros_gz_sim``/``ros_gz_bridge``/Nav2's
+    own packages as dependencies at all -- wrong metadata for anything that
+    resolves dependencies from it (e.g. ``rosdep``), even though colcon
+    itself doesn't enforce this for a plain ``ament_cmake`` package with no
+    compiled code. Duplicates against the base set are dropped, preserving
+    ``extra_depends``' order for anything new.
     """
     output_dir = Path(output_dir)
     pkg_dir = output_dir / robot.name
@@ -66,7 +79,7 @@ def generate_package(
     for d in (pkg_dir, urdf_dir, meshes_dir, launch_dir, rviz_dir, config_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    _write_package_xml(robot, pkg_dir)
+    _write_package_xml(robot, pkg_dir, extra_depends or [])
     _write_urdf_xacro(robot, urdf_dir, urdf_xacro)
     _write_meshes(mesh_files, meshes_dir)
     _write_launch(robot, launch_dir)
@@ -99,7 +112,7 @@ def _write_extra_files(extra_files: Dict[str, FileContent], pkg_dir: Path) -> No
             raise TypeError(f"extra_files[{rel_path!r}] must be str or bytes, got {type(content).__name__}")
 
 
-def _write_package_xml(robot: Robot, pkg_dir: Path) -> None:
+def _write_package_xml(robot: Robot, pkg_dir: Path, extra_depends: List[str]) -> None:
     meta = robot.metadata or {}
     version = meta.get("version", "0.0.1")
     description = meta.get(
@@ -119,6 +132,9 @@ def _write_package_xml(robot: Robot, pkg_dir: Path) -> None:
         "launch",
         "launch_ros",
     ]
+    for dep in extra_depends:
+        if dep not in depends:
+            depends.append(dep)
     depend_lines = "\n".join(f"  <depend>{d}</depend>" for d in depends)
 
     content = f"""<?xml version="1.0"?>

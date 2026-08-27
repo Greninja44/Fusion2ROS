@@ -358,6 +358,7 @@ def generate_ros_package(
 
     fragments: List[str] = []
     extra_files: Dict[str, str] = {}
+    extra_depends: List[str] = []
 
     if include_ros2_control:
         _report("Generating ros2_control configuration")
@@ -373,18 +374,51 @@ def generate_ros_package(
 
     if include_gazebo:
         _report("Generating Gazebo Sim configuration")
-        from .generators.gazebo import generate_gazebo_xml, generate_spawn_launch, generate_world_sdf
+        # Real gap found while adding Gazebo support: package.xml never
+        # declared ros_gz_sim/ros_gz_bridge/gz_ros2_control regardless of
+        # include_gazebo -- see generate_package's extra_depends docstring.
+        extra_depends.extend(["ros_gz_sim", "ros_gz_bridge", "gz_ros2_control"])
+        from .generators.gazebo import (
+            generate_gazebo_ros_bridge_yaml,
+            generate_gazebo_xml,
+            generate_spawn_launch,
+            generate_world_sdf,
+        )
 
         fragments.append(generate_gazebo_xml(robot))
         extra_files["worlds/empty.sdf"] = generate_world_sdf()
-        extra_files["launch/gazebo.launch.py"] = generate_spawn_launch(robot)
+
+        # generate_gazebo_ros_bridge_yaml covers joint_states (any non-fixed
+        # joint) and, for a differential-drive robot, the native DiffDrive
+        # plugin's cmd_vel/odom/tf topics (see gazebo.py's module docstring
+        # for why DiffDrive replaces gz_ros2_control for that case). Both
+        # this and sensors.py's generate_ros_gz_bridge_yaml emit the same
+        # flat "- ros_topic_name: ..." list style with no "[...]" wrapper,
+        # so concatenating their text is one valid combined bridge config --
+        # exactly what a single `ros_gz_bridge parameter_bridge` process
+        # needs (it takes one config file, not one per source).
+        bridge_yaml_parts = []
+        gazebo_bridge_yaml = generate_gazebo_ros_bridge_yaml(robot)
+        if gazebo_bridge_yaml:
+            bridge_yaml_parts.append(gazebo_bridge_yaml)
 
         if robot.sensors:
             _report("Generating sensor configuration")
             from .generators.sensors import generate_ros_gz_bridge_yaml, generate_sensor_gazebo_xml
 
             fragments.append(generate_sensor_gazebo_xml(robot))
-            extra_files["config/ros_gz_bridge.yaml"] = generate_ros_gz_bridge_yaml(robot)
+            bridge_yaml_parts.append(generate_ros_gz_bridge_yaml(robot))
+
+        include_bridge = bool(bridge_yaml_parts)
+        if include_bridge:
+            extra_files["config/ros_gz_bridge.yaml"] = "".join(bridge_yaml_parts)
+
+        # Written after bridge_yaml_parts is known, so the spawn launch only
+        # starts `ros_gz_bridge`'s parameter_bridge node when there's an
+        # actual config/ros_gz_bridge.yaml for it to read -- see
+        # generate_spawn_launch's docstring for the real gap this closes
+        # (the bridge config was previously written but never started).
+        extra_files["launch/gazebo.launch.py"] = generate_spawn_launch(robot, include_bridge=include_bridge)
 
     if include_moveit:
         _report("Generating MoveIt 2 configuration")
@@ -445,7 +479,9 @@ def generate_ros_package(
     # the package (its own, independent contract) -- re-key at this boundary
     # rather than making either side guess the other's convention.
     package_mesh_files = {Path(path).name: path for path in mesh_files.values()}
-    return generate_package(robot, urdf_xacro, package_mesh_files, output_dir, extra_files=extra_files)
+    return generate_package(
+        robot, urdf_xacro, package_mesh_files, output_dir, extra_files=extra_files, extra_depends=extra_depends
+    )
 
 
 def run_pipeline(
