@@ -38,7 +38,17 @@ from typing import Dict, Optional
 import adsk.core
 import adsk.fusion
 
+from bridge.windows.doctor import all_critical_passed, format_report, run_environment_checks
+from bridge.windows.invoke import (
+    DEFAULT_DISTRO,
+    DEFAULT_ROS_SETUP,
+    DEFAULT_WSL_ROS_WS_SRC,
+    build_package_in_wsl,
+    launch_ros2_in_wsl,
+)
+
 from .. import app
+from ..extraction.drivetrain_detect import detect_drivetrain
 from ..extraction.fusion_adapter import FusionDesignReaderAdapter
 from ..generators.mesh import export_link_meshes
 from . import state
@@ -112,6 +122,21 @@ _MECANUM_INPUT_IDS = (
     "drivetrain_mecanum_wheel_radius_m",
     "drivetrain_mecanum_center_sum_m",
 )
+
+# One-click "Generate -> Build -> Launch" (task: reduce manual steps between
+# Fusion and WSL). "Don't launch" is the safe default -- launching starts a
+# GUI (RViz/Gazebo) or a long-lived bringup, not something to fire
+# automatically without the user opting in explicitly via this dropdown.
+_LAUNCH_NONE = "Don't launch"
+_LAUNCH_DISPLAY = "display.launch.py (RViz)"
+_LAUNCH_GAZEBO = "gazebo.launch.py (Gazebo Sim)"
+_LAUNCH_NAV2 = "nav2_bringup.launch.py (Nav2)"
+_LAUNCH_FILES = {
+    _LAUNCH_DISPLAY: "display.launch.py",
+    _LAUNCH_GAZEBO: "gazebo.launch.py",
+    _LAUNCH_NAV2: "nav2_bringup.launch.py",
+}
+_BUILD_CHAIN_INPUT_IDS = ("wsl_ros_ws_src_for_build", "launch_after_build")
 
 _handlers = []  # Fusion requires handlers to be kept alive; module-level list per standard pattern.
 
@@ -271,6 +296,81 @@ def _set_drivetrain_inputs_visibility(inputs: "adsk.core.CommandInputs") -> None
         inputs.itemById(input_id).isVisible = selected == _DRIVETRAIN_MECANUM
 
 
+def _set_build_chain_inputs_visibility(inputs: "adsk.core.CommandInputs") -> None:
+    """Shows the WSL-workspace-path/launch-choice inputs only when "Also
+    build in WSL after generating" is checked -- same show/hide-without-
+    destroying pattern as _set_drivetrain_inputs_visibility."""
+    build_checked = inputs.itemById("build_in_wsl_after_generate").value
+    for input_id in _BUILD_CHAIN_INPUT_IDS:
+        inputs.itemById(input_id).isVisible = build_checked
+
+
+def _select_drivetrain_type(inputs: "adsk.core.CommandInputs", label: str) -> None:
+    """Programmatically selects `label` in the "drivetrain_type" dropdown --
+    DropDownCommandInput.listItems / ListItem.isSelected, the same
+    real-confirmed API this file already uses to READ the selection
+    (`.selectedItem.name`, see _set_drivetrain_inputs_visibility) and to
+    ADD items with an initial isSelected value (`listItems.add(name,
+    isSelected)`, see the drivetrain_type dropdown's own setup) -- setting
+    isSelected on an existing ListItem is the same property used in
+    reverse, a standard exclusive-selection dropdown pattern."""
+    drivetrain_input = inputs.itemById("drivetrain_type")
+    for item in drivetrain_input.listItems:
+        if item.name == label:
+            item.isSelected = True
+            return
+
+
+def _apply_drivetrain_smart_default_checkboxes(inputs: "adsk.core.CommandInputs") -> None:
+    """Nudges "Gazebo" and "Nav2" checked once a drivetrain is selected --
+    the natural payoff of telling Fusion2ROS about a wheeled robot's
+    drivetrain is simulating/navigating with it. Deliberately one-directional
+    (only ever turns these ON, never OFF): switching drivetrain_type back to
+    "None" must not silently uncheck Gazebo/Nav2 out from under a user who
+    wants them for an arm too, or who unchecked drivetrain by mistake after
+    already deciding they want Gazebo regardless."""
+    if inputs.itemById("drivetrain_type").selectedItem.name == _DRIVETRAIN_NONE:
+        return
+    gazebo_input = inputs.itemById("include_gazebo")
+    if not gazebo_input.value:
+        gazebo_input.value = True
+    nav2_input = inputs.itemById("include_nav2")
+    if not nav2_input.value:
+        nav2_input.value = True
+
+
+def _drivetrain_fields_are_empty(inputs: "adsk.core.CommandInputs") -> bool:
+    return all(not inputs.itemById(input_id).value.strip() for input_id in _DIFFERENTIAL_INPUT_IDS)
+
+
+def _apply_auto_detected_drivetrain(inputs: "adsk.core.CommandInputs", robot) -> None:
+    """Pre-fills the Differential Drive drivetrain fields from
+    drivetrain_detect.detect_drivetrain's best-effort geometric guess --
+    ONLY when the user hasn't already picked a drivetrain type or typed
+    anything into the differential-drive fields, so this never overwrites a
+    manual choice (including a manual choice of "None", or Mecanum, or
+    different differential joint names than the guess). Always an editable
+    suggestion, never forced -- see detect_drivetrain's own docstring for
+    the heuristic and its conservative return-None-rather-than-guess-wrong
+    stance."""
+    if inputs.itemById("drivetrain_type").selectedItem.name != _DRIVETRAIN_NONE:
+        return
+    if not _drivetrain_fields_are_empty(inputs):
+        return
+
+    drivetrain = detect_drivetrain(robot)
+    if drivetrain is None:
+        return
+
+    inputs.itemById("drivetrain_left_wheel_joint").value = drivetrain["left_wheel_joint"]
+    inputs.itemById("drivetrain_right_wheel_joint").value = drivetrain["right_wheel_joint"]
+    inputs.itemById("drivetrain_wheel_separation_m").value = str(drivetrain["wheel_separation"])
+    inputs.itemById("drivetrain_wheel_radius_m").value = str(drivetrain["wheel_radius"])
+    _select_drivetrain_type(inputs, _DRIVETRAIN_DIFFERENTIAL)
+    _set_drivetrain_inputs_visibility(inputs)
+    _apply_drivetrain_smart_default_checkboxes(inputs)
+
+
 def _parse_positive_float(inputs: "adsk.core.CommandInputs", input_id: str, field_label: str) -> float:
     raw = inputs.itemById(input_id).value.strip()
     try:
@@ -370,6 +470,7 @@ def _refresh_detected_summary(inputs: "adsk.core.CommandInputs") -> None:
         robot = app.build_robot_from_reader(reader, robot_name)
         text_input.text = app.format_robot_summary(robot)
         _last_summary_dict = app.robot_summary_as_dict(robot)
+        _apply_auto_detected_drivetrain(inputs, robot)
         _push_summary_to_palette(ui)
     except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
         text_input.text = f"(could not detect links/joints yet: {exc})"
@@ -493,6 +594,26 @@ class GenerateCommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
             _set_drivetrain_inputs_visibility(inputs)
 
+            # One-click "Generate -> Build -> Launch" (opt-in, default off --
+            # this adds real wall-clock time and needs a usable WSL/ROS 2
+            # environment, checked automatically via bridge.windows.doctor
+            # right before the build step in GenerateCommandExecuteHandler).
+            inputs.addBoolValueInput(
+                "build_in_wsl_after_generate", "Also build in WSL after generating", True, "", False
+            )
+            default_ws_src = state.get_last_wsl_ros_ws_src() or DEFAULT_WSL_ROS_WS_SRC
+            inputs.addStringValueInput(
+                "wsl_ros_ws_src_for_build", "WSL colcon workspace src/ (if building)", default_ws_src
+            )
+            launch_input = inputs.addDropDownCommandInput(
+                "launch_after_build", "Launch after build", adsk.core.DropDownStyles.TextListDropDownStyle
+            )
+            launch_input.listItems.add(_LAUNCH_NONE, True)
+            launch_input.listItems.add(_LAUNCH_DISPLAY, False)
+            launch_input.listItems.add(_LAUNCH_GAZEBO, False)
+            launch_input.listItems.add(_LAUNCH_NAV2, False)
+            _set_build_chain_inputs_visibility(inputs)
+
             # Detected Links/Joints readback (task item 3). addTextBoxCommandInput
             # signature confirmed via help.autodesk.com (id, name,
             # formattedText, numRows, isReadOnly) -- Autodesk's docs flag this
@@ -579,6 +700,77 @@ class GenerateInputChangedHandler(adsk.core.InputChangedEventHandler):
             _refresh_detected_summary(args.inputs)
         elif args.input.id == "drivetrain_type":
             _set_drivetrain_inputs_visibility(args.inputs)
+            _apply_drivetrain_smart_default_checkboxes(args.inputs)
+        elif args.input.id == "build_in_wsl_after_generate":
+            _set_build_chain_inputs_visibility(args.inputs)
+
+
+def _build_and_maybe_launch_in_wsl(
+    progress_dialog: "adsk.core.ProgressDialog",
+    package_dir: Path,
+    robot_name: str,
+    wsl_ros_ws_src: str,
+    launch_choice: str,
+    include_gazebo: bool,
+) -> str:
+    """The "Also build in WSL after generating" / "Launch after build"
+    one-click chain: doctor-check the WSL/ROS 2 environment, build the
+    just-generated package there, and (opt-in, per `launch_choice`) launch
+    it -- all from the same "Generate ROS 2 Package" dialog, instead of
+    requiring a separate "Build in WSL" command run afterwards with
+    manually-retyped paths.
+
+    Returns a plain-text report string for the caller to fold into its own
+    messageBox -- never raises for an ordinary failure (unready
+    environment, failed build, failed launch); each is reported as text,
+    matching this file's existing PipelineError-style "show the real reason,
+    not a traceback" convention. Reuses `progress_dialog` (already open from
+    generation) rather than creating a second one, updating only its
+    `.message` -- never touching `.minimumValue`/`.maximumValue` here (see
+    build_command.py's own real-bug comment on why `.show(..., 0, 0, 0)`
+    is invalid) since generation already left them at a valid, non-equal
+    range.
+    """
+    progress_dialog.message = "Checking WSL environment..."
+    checks = run_environment_checks(
+        distro=DEFAULT_DISTRO, ros_setup=DEFAULT_ROS_SETUP, wsl_ros_ws_src=wsl_ros_ws_src, check_gazebo=include_gazebo
+    )
+    if not all_critical_passed(checks):
+        return f"Package generated, but the WSL environment isn't ready to build it:\n\n{format_report(checks)}"
+
+    progress_dialog.message = "Building in WSL..."
+
+    def _on_output_line(line: str) -> None:
+        progress_dialog.message = line[-200:] if line else progress_dialog.message
+
+    build_result = build_package_in_wsl(
+        str(package_dir),
+        wsl_ros_ws_src,
+        distro=DEFAULT_DISTRO,
+        ros_setup=DEFAULT_ROS_SETUP,
+        on_output_line=_on_output_line,
+        timeout=600,
+    )
+    if not build_result.success:
+        return f"Package generated, but the WSL build FAILED (exit {build_result.returncode}):\n\n{build_result.stderr}"
+
+    state.set_last_wsl_ros_ws_src(wsl_ros_ws_src)
+
+    if launch_choice == _LAUNCH_NONE:
+        return f"Built successfully in the WSL workspace:\n{wsl_ros_ws_src}"
+
+    launch_file = _LAUNCH_FILES[launch_choice]
+    progress_dialog.message = f"Launching {launch_file}..."
+    launch_result = launch_ros2_in_wsl(
+        package_name=robot_name,
+        launch_file=launch_file,
+        wsl_ros_ws_src=wsl_ros_ws_src,
+        distro=DEFAULT_DISTRO,
+        ros_setup=DEFAULT_ROS_SETUP,
+    )
+    if launch_result.success:
+        return f"Built successfully and launched {launch_file} in WSL.\n\n{launch_result.stdout}"
+    return f"Built successfully, but launching {launch_file} FAILED:\n\n{launch_result.stderr}"
 
 
 class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
@@ -666,7 +858,16 @@ class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
                 )
 
             state.set_last_generated(package_dir, robot_name)
-            ui.messageBox(f"Fusion2ROS: generated ROS 2 package at:\n{package_dir}")
+            report_lines = [f"Fusion2ROS: generated ROS 2 package at:\n{package_dir}"]
+
+            if inputs.itemById("build_in_wsl_after_generate").value:
+                wsl_ros_ws_src = inputs.itemById("wsl_ros_ws_src_for_build").value.strip() or DEFAULT_WSL_ROS_WS_SRC
+                launch_choice = inputs.itemById("launch_after_build").selectedItem.name
+                report_lines.append(
+                    _build_and_maybe_launch_in_wsl(progress_dialog, package_dir, robot_name, wsl_ros_ws_src, launch_choice, include_gazebo)
+                )
+
+            ui.messageBox("\n\n".join(report_lines))
         except app.GenerationCancelled:
             # Deliberate, user-initiated stop (Cancel button on the progress
             # dialog) -- not an error, so no traceback / no PipelineError-style

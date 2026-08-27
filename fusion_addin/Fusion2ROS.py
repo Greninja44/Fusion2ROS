@@ -47,9 +47,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import adsk.core
 
-from .ui import build_command, command, launch_command, validate_command
+from .ui import build_command, command, doctor_command, launch_command, validate_command
 
-_MODULES = (command, validate_command, build_command, launch_command)
+_MODULES = (command, validate_command, build_command, launch_command, doctor_command)
 
 
 def run(context):
