@@ -28,6 +28,7 @@ sys.modules.setdefault("adsk.core", MagicMock())
 sys.modules.setdefault("adsk.fusion", MagicMock())
 
 from fusion_addin.ui import command as cmd  # noqa: E402
+import fusion_addin.generators.moveit as moveit_module  # noqa: E402
 
 
 class _FakeStringInput:
@@ -74,13 +75,12 @@ class _FakeListItems:
 
 
 class _FakeDropDown:
-    def __init__(self, initial_selection):
+    def __init__(self, options, initial_selection):
         self._items = []
         self.listItems = _FakeListItems(self)
         self.isVisible = True
-        self.listItems.add(cmd._DRIVETRAIN_NONE, initial_selection == cmd._DRIVETRAIN_NONE)
-        self.listItems.add(cmd._DRIVETRAIN_DIFFERENTIAL, initial_selection == cmd._DRIVETRAIN_DIFFERENTIAL)
-        self.listItems.add(cmd._DRIVETRAIN_MECANUM, initial_selection == cmd._DRIVETRAIN_MECANUM)
+        for option in options:
+            self.listItems.add(option, option == initial_selection)
 
     @property
     def selectedItem(self):
@@ -90,16 +90,33 @@ class _FakeDropDown:
         return None
 
 
+_DRIVETRAIN_OPTIONS = (cmd._DRIVETRAIN_NONE, cmd._DRIVETRAIN_DIFFERENTIAL, cmd._DRIVETRAIN_MECANUM)
+_LAUNCH_OPTIONS = (cmd._LAUNCH_NONE, cmd._LAUNCH_DISPLAY, cmd._LAUNCH_GAZEBO, cmd._LAUNCH_NAV2, cmd._LAUNCH_BRINGUP)
+
+
 class _FakeInputs:
-    def __init__(self, string_values=None, bool_values=None, drivetrain_selection=cmd._DRIVETRAIN_NONE):
+    def __init__(
+        self,
+        string_values=None,
+        bool_values=None,
+        drivetrain_selection=cmd._DRIVETRAIN_NONE,
+        launch_selection=cmd._LAUNCH_NONE,
+    ):
         self._values = {}
-        for input_id in cmd._DIFFERENTIAL_INPUT_IDS + cmd._MECANUM_INPUT_IDS:
+        for input_id in cmd._DIFFERENTIAL_INPUT_IDS + cmd._MECANUM_INPUT_IDS + cmd._SENSOR_DEPENDENT_INPUT_IDS:
             self._values[input_id] = _FakeStringInput((string_values or {}).get(input_id, ""))
-        for input_id, value in (bool_values or {}).items():
-            self._values[input_id] = _FakeBoolInput(value)
-        self._values["drivetrain_type"] = _FakeDropDown(drivetrain_selection)
-        for input_id in cmd._BUILD_CHAIN_INPUT_IDS:
-            self._values.setdefault(input_id, _FakeStringInput(""))
+        for input_id in ("moveit_group_name", "wsl_ros_ws_src_for_build"):
+            self._values[input_id] = _FakeStringInput((string_values or {}).get(input_id, ""))
+        for input_id in cmd._PERSISTED_BOOL_FIELD_IDS:
+            self._values[input_id] = _FakeBoolInput((bool_values or {}).get(input_id, False))
+        self._values["drivetrain_type"] = _FakeDropDown(_DRIVETRAIN_OPTIONS, drivetrain_selection)
+        self._values["launch_after_build"] = _FakeDropDown(_LAUNCH_OPTIONS, launch_selection)
+        for slot in cmd._SENSOR_SLOT_IDS:
+            type_id = cmd._sensor_slot_input_ids(slot)["type"]
+            self._values[type_id] = _FakeDropDown(
+                (cmd._SENSOR_TYPE_NONE, cmd._SENSOR_TYPE_CAMERA, cmd._SENSOR_TYPE_LIDAR, cmd._SENSOR_TYPE_IMU),
+                (string_values or {}).get(type_id, cmd._SENSOR_TYPE_NONE),
+            )
 
     def itemById(self, input_id):
         return self._values[input_id]
@@ -336,3 +353,213 @@ def test_build_chain_reports_launch_failure(monkeypatch):
 
     assert "FAILED" in report
     assert "launch broke" in report
+
+
+# ---------------------------------------------------------------------------
+# _apply_moveit_smart_default_checkbox
+# ---------------------------------------------------------------------------
+
+
+def test_moveit_smart_default_checks_when_suitable(monkeypatch):
+    monkeypatch.setattr(moveit_module, "detect_moveit_suitability", lambda robot: [])
+    inputs = _FakeInputs(bool_values={"include_moveit": False})
+
+    cmd._apply_moveit_smart_default_checkbox(inputs, robot=object())
+
+    assert inputs.itemById("include_moveit").value is True
+
+
+def test_moveit_smart_default_leaves_unchecked_when_unsuitable(monkeypatch):
+    monkeypatch.setattr(moveit_module, "detect_moveit_suitability", lambda robot: ["branchy robot"])
+    inputs = _FakeInputs(bool_values={"include_moveit": False})
+
+    cmd._apply_moveit_smart_default_checkbox(inputs, robot=object())
+
+    assert inputs.itemById("include_moveit").value is False
+
+
+def test_moveit_smart_default_never_unchecks(monkeypatch):
+    monkeypatch.setattr(moveit_module, "detect_moveit_suitability", lambda robot: ["branchy robot"])
+    inputs = _FakeInputs(bool_values={"include_moveit": True})
+
+    cmd._apply_moveit_smart_default_checkbox(inputs, robot=object())
+
+    assert inputs.itemById("include_moveit").value is True
+
+
+def test_moveit_smart_default_skipped_when_drivetrain_selected(monkeypatch):
+    called = []
+    monkeypatch.setattr(moveit_module, "detect_moveit_suitability", lambda robot: called.append(1) or [])
+    inputs = _FakeInputs(bool_values={"include_moveit": False}, drivetrain_selection=cmd._DRIVETRAIN_DIFFERENTIAL)
+
+    cmd._apply_moveit_smart_default_checkbox(inputs, robot=object())
+
+    assert not called
+    assert inputs.itemById("include_moveit").value is False
+
+
+# ---------------------------------------------------------------------------
+# _collect_persistable_dialog_state / _apply_persisted_dialog_state
+# ---------------------------------------------------------------------------
+
+
+def test_collect_and_apply_persisted_dialog_state_round_trips():
+    inputs = _FakeInputs(
+        string_values={
+            "drivetrain_left_wheel_joint": "left_j",
+            "drivetrain_right_wheel_joint": "right_j",
+            "drivetrain_wheel_separation_m": "0.4",
+            "drivetrain_wheel_radius_m": "0.1",
+            "moveit_group_name": "my_arm",
+            "wsl_ros_ws_src_for_build": "~/custom_ws/src",
+        },
+        bool_values={"include_gazebo": True, "include_nav2": True, "build_in_wsl_after_generate": True},
+        drivetrain_selection=cmd._DRIVETRAIN_DIFFERENTIAL,
+        launch_selection=cmd._LAUNCH_GAZEBO,
+    )
+
+    saved = cmd._collect_persistable_dialog_state(inputs)
+
+    fresh_inputs = _FakeInputs()
+    cmd._apply_persisted_dialog_state(fresh_inputs, saved)
+
+    assert fresh_inputs.itemById("include_gazebo").value is True
+    assert fresh_inputs.itemById("include_nav2").value is True
+    assert fresh_inputs.itemById("build_in_wsl_after_generate").value is True
+    assert fresh_inputs.itemById("moveit_group_name").value == "my_arm"
+    assert fresh_inputs.itemById("wsl_ros_ws_src_for_build").value == "~/custom_ws/src"
+    assert fresh_inputs.itemById("drivetrain_type").selectedItem.name == cmd._DRIVETRAIN_DIFFERENTIAL
+    assert fresh_inputs.itemById("drivetrain_left_wheel_joint").value == "left_j"
+    assert fresh_inputs.itemById("launch_after_build").selectedItem.name == cmd._LAUNCH_GAZEBO
+    # visibility follows the restored selections
+    assert fresh_inputs.itemById("drivetrain_left_wheel_joint").isVisible is True
+    assert fresh_inputs.itemById("wsl_ros_ws_src_for_build").isVisible is True
+
+
+def test_apply_persisted_dialog_state_ignores_missing_keys():
+    inputs = _FakeInputs()
+    # A partial/older save missing several keys must not raise and must
+    # leave everything else at its existing default.
+    cmd._apply_persisted_dialog_state(inputs, {"include_gazebo": True})
+    assert inputs.itemById("include_gazebo").value is True
+    assert inputs.itemById("include_nav2").value is False
+
+
+def test_apply_persisted_dialog_state_ignores_unknown_dropdown_label():
+    inputs = _FakeInputs()
+    # Simulates a stale save naming an option a newer/older dialog version
+    # doesn't have -- must not raise.
+    cmd._apply_persisted_dialog_state(inputs, {"drivetrain_type": "Some Removed Option"})
+    assert inputs.itemById("drivetrain_type").selectedItem.name == cmd._DRIVETRAIN_NONE
+
+
+# ---------------------------------------------------------------------------
+# _validate_generated_package
+# ---------------------------------------------------------------------------
+
+
+def test_validate_generated_package_reports_structure_and_urdf_problems(monkeypatch, tmp_path):
+    monkeypatch.setattr(cmd, "validate_package_structure", lambda pkg_dir: ["missing package.xml"])
+    monkeypatch.setattr(cmd, "validate_urdf_file", lambda path: [f"bad xml in {path.name}"])
+    urdf_dir = tmp_path / "urdf"
+    urdf_dir.mkdir()
+    (urdf_dir / "robot.urdf.xacro").write_text("<robot/>", encoding="utf-8")
+
+    problems = cmd._validate_generated_package(tmp_path)
+
+    assert "missing package.xml" in problems
+    assert any("robot.urdf.xacro" in p for p in problems)
+
+
+def test_validate_generated_package_clean_package_returns_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(cmd, "validate_package_structure", lambda pkg_dir: [])
+    monkeypatch.setattr(cmd, "validate_urdf_file", lambda path: [])
+    urdf_dir = tmp_path / "urdf"
+    urdf_dir.mkdir()
+    (urdf_dir / "robot.urdf.xacro").write_text("<robot/>", encoding="utf-8")
+
+    assert cmd._validate_generated_package(tmp_path) == []
+
+
+def test_validate_generated_package_missing_urdf_dir_does_not_raise(monkeypatch, tmp_path):
+    monkeypatch.setattr(cmd, "validate_package_structure", lambda pkg_dir: ["no urdf dir"])
+    called = []
+    monkeypatch.setattr(cmd, "validate_urdf_file", lambda path: called.append(1) or [])
+
+    problems = cmd._validate_generated_package(tmp_path)
+
+    assert problems == ["no urdf dir"]
+    assert not called
+
+
+# ---------------------------------------------------------------------------
+# Sensor UI: _set_sensor_inputs_visibility / _build_sensors
+# ---------------------------------------------------------------------------
+
+
+def _set_sensor_slot(inputs, slot, type_label, parent_link="", name="", update_rate=""):
+    ids = cmd._sensor_slot_input_ids(slot)
+    cmd._select_dropdown_item(inputs, ids["type"], type_label)
+    inputs.itemById(ids["parent_link"]).value = parent_link
+    inputs.itemById(ids["name"]).value = name
+    inputs.itemById(ids["update_rate"]).value = update_rate
+
+
+def test_sensor_inputs_hidden_by_default():
+    inputs = _FakeInputs()
+    cmd._set_sensor_inputs_visibility(inputs)
+    for slot in cmd._SENSOR_SLOT_IDS:
+        ids = cmd._sensor_slot_input_ids(slot)
+        assert inputs.itemById(ids["parent_link"]).isVisible is False
+        assert inputs.itemById(ids["name"]).isVisible is False
+        assert inputs.itemById(ids["update_rate"]).isVisible is False
+
+
+def test_sensor_inputs_shown_only_for_active_slot():
+    inputs = _FakeInputs()
+    _set_sensor_slot(inputs, 2, cmd._SENSOR_TYPE_CAMERA)
+    cmd._set_sensor_inputs_visibility(inputs)
+
+    ids1 = cmd._sensor_slot_input_ids(1)
+    ids2 = cmd._sensor_slot_input_ids(2)
+    assert inputs.itemById(ids1["parent_link"]).isVisible is False
+    assert inputs.itemById(ids2["parent_link"]).isVisible is True
+
+
+def test_build_sensors_empty_when_all_slots_none():
+    inputs = _FakeInputs()
+    assert cmd._build_sensors(inputs) == []
+
+
+def test_build_sensors_builds_camera_lidar_imu():
+    inputs = _FakeInputs()
+    _set_sensor_slot(inputs, 1, cmd._SENSOR_TYPE_CAMERA, parent_link="head_link", name="head_cam")
+    _set_sensor_slot(inputs, 2, cmd._SENSOR_TYPE_LIDAR, parent_link="base_link", update_rate="20")
+    _set_sensor_slot(inputs, 3, cmd._SENSOR_TYPE_IMU, parent_link="imu_link")
+
+    sensors = cmd._build_sensors(inputs)
+
+    by_type = {s.type: s for s in sensors}
+    assert set(by_type) == {"camera", "lidar", "imu"}
+    assert by_type["camera"].name == "head_cam"
+    assert by_type["camera"].parent_link == "head_link"
+    assert by_type["lidar"].parent_link == "base_link"
+    assert by_type["lidar"].parameters == {"update_rate": 20.0}
+    assert by_type["imu"].name == "imu_3"  # auto-named from type + slot
+    assert by_type["imu"].parameters == {}
+
+
+def test_build_sensors_missing_parent_link_raises():
+    inputs = _FakeInputs()
+    _set_sensor_slot(inputs, 1, cmd._SENSOR_TYPE_CAMERA, parent_link="")
+
+    with pytest.raises(ValueError, match="parent link"):
+        cmd._build_sensors(inputs)
+
+
+def test_build_sensors_non_numeric_update_rate_raises():
+    inputs = _FakeInputs()
+    _set_sensor_slot(inputs, 1, cmd._SENSOR_TYPE_IMU, parent_link="imu_link", update_rate="fast")
+
+    with pytest.raises(ValueError, match="update rate"):
+        cmd._build_sensors(inputs)

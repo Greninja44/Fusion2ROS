@@ -47,6 +47,17 @@ from bridge.windows.invoke import (
     launch_ros2_in_wsl,
 )
 
+# Crosses docs/ARCHITECTURE.md's "nothing under fusion_addin/ imports
+# anything under ros2_tools/" layering rule -- validate_command.py's own
+# docstring already documents the same deliberate exception (pure-stdlib,
+# zero adsk/live-ROS dependency, so it runs fine under Windows Python too);
+# this file now does the same to chain validation straight into Generate,
+# instead of requiring a separate manual "Validate ROS 2 Package" run.
+from robot_model import Sensor
+
+from ros2_tools.validate.package import validate_package_structure
+from ros2_tools.validate.urdf import validate_urdf_file
+
 from .. import app
 from ..extraction.drivetrain_detect import detect_drivetrain
 from ..extraction.fusion_adapter import FusionDesignReaderAdapter
@@ -131,12 +142,80 @@ _LAUNCH_NONE = "Don't launch"
 _LAUNCH_DISPLAY = "display.launch.py (RViz)"
 _LAUNCH_GAZEBO = "gazebo.launch.py (Gazebo Sim)"
 _LAUNCH_NAV2 = "nav2_bringup.launch.py (Nav2)"
+_LAUNCH_BRINGUP = "bringup.launch.py (everything together)"
 _LAUNCH_FILES = {
     _LAUNCH_DISPLAY: "display.launch.py",
     _LAUNCH_GAZEBO: "gazebo.launch.py",
     _LAUNCH_NAV2: "nav2_bringup.launch.py",
+    _LAUNCH_BRINGUP: "bringup.launch.py",
 }
 _BUILD_CHAIN_INPUT_IDS = ("wsl_ros_ws_src_for_build", "launch_after_build")
+
+# Sensor UI (real gap: fusion_addin/generators/sensors.py's camera/lidar/imu
+# Gazebo XML + ros_gz_bridge generation already worked, but nothing in this
+# dialog let a Fusion user actually attach a sensor to a link -- the only
+# way was hand-editing a Robot object in a script. A fixed number of
+# independent "slots" (not a dynamically-add-a-row UI, which Fusion's
+# CommandInputs API has no established pattern for anywhere in this file)
+# mirrors the drivetrain dropdown's own "None (arm/manipulator)" convention,
+# extended to several independent choices -- 3 is enough for the common
+# cases (e.g. one camera + one lidar + one imu) without cluttering the
+# dialog; a user needing more can still hand-edit the generated URDF/robot
+# script the way they always could.
+_SENSOR_TYPE_NONE = "None"
+_SENSOR_TYPE_CAMERA = "Camera"
+_SENSOR_TYPE_LIDAR = "Lidar"
+_SENSOR_TYPE_IMU = "IMU"
+_SENSOR_TYPE_LABEL_TO_MODEL_TYPE = {
+    _SENSOR_TYPE_CAMERA: "camera",
+    _SENSOR_TYPE_LIDAR: "lidar",
+    _SENSOR_TYPE_IMU: "imu",
+}
+_SENSOR_SLOT_COUNT = 3
+_SENSOR_SLOT_IDS = tuple(range(1, _SENSOR_SLOT_COUNT + 1))
+
+
+def _sensor_slot_input_ids(slot: int) -> Dict[str, str]:
+    return {
+        "type": f"sensor{slot}_type",
+        "parent_link": f"sensor{slot}_parent_link",
+        "name": f"sensor{slot}_name",
+        "update_rate": f"sensor{slot}_update_rate_hz",
+    }
+
+
+_SENSOR_DEPENDENT_INPUT_IDS = tuple(
+    _sensor_slot_input_ids(slot)[field] for slot in _SENSOR_SLOT_IDS for field in ("parent_link", "name", "update_rate")
+)
+
+# Persisted (to disk, via ui/state.py's JSON file, keyed by robot name) so
+# reopening "Generate ROS 2 Package" -- even after a full Fusion restart --
+# restores every checkbox/drivetrain/build-chain/sensor field instead of
+# only robot_name/output_dir. Deliberately excludes "robot_name"/
+# "output_dir" (already have their own defaulting via the design's name /
+# a fixed default path) and "root_occurrence" (a live Design selection, not
+# something JSON-serializable or meaningful to restore across designs).
+_PERSISTED_BOOL_FIELD_IDS = (
+    "include_ros2_control",
+    "include_gazebo",
+    "include_moveit",
+    "include_nav2",
+    "use_bounding_box_collision",
+    "build_in_wsl_after_generate",
+)
+_PERSISTED_STRING_FIELD_IDS = (
+    ("moveit_group_name", "wsl_ros_ws_src_for_build")
+    + _DIFFERENTIAL_INPUT_IDS
+    + _MECANUM_INPUT_IDS
+    + tuple(
+        _sensor_slot_input_ids(slot)[field]
+        for slot in _SENSOR_SLOT_IDS
+        for field in ("parent_link", "name", "update_rate")
+    )
+)
+_PERSISTED_DROPDOWN_FIELD_IDS = ("drivetrain_type", "launch_after_build") + tuple(
+    _sensor_slot_input_ids(slot)["type"] for slot in _SENSOR_SLOT_IDS
+)
 
 _handlers = []  # Fusion requires handlers to be kept alive; module-level list per standard pattern.
 
@@ -305,20 +384,63 @@ def _set_build_chain_inputs_visibility(inputs: "adsk.core.CommandInputs") -> Non
         inputs.itemById(input_id).isVisible = build_checked
 
 
-def _select_drivetrain_type(inputs: "adsk.core.CommandInputs", label: str) -> None:
-    """Programmatically selects `label` in the "drivetrain_type" dropdown --
+def _select_dropdown_item(inputs: "adsk.core.CommandInputs", input_id: str, label: str) -> None:
+    """Programmatically selects `label` in the dropdown at `input_id` --
     DropDownCommandInput.listItems / ListItem.isSelected, the same
-    real-confirmed API this file already uses to READ the selection
+    real-confirmed API this file already uses to READ a selection
     (`.selectedItem.name`, see _set_drivetrain_inputs_visibility) and to
     ADD items with an initial isSelected value (`listItems.add(name,
-    isSelected)`, see the drivetrain_type dropdown's own setup) -- setting
-    isSelected on an existing ListItem is the same property used in
-    reverse, a standard exclusive-selection dropdown pattern."""
-    drivetrain_input = inputs.itemById("drivetrain_type")
-    for item in drivetrain_input.listItems:
+    isSelected)`, see the drivetrain_type/launch_after_build dropdowns' own
+    setup) -- setting isSelected on an existing ListItem is the same
+    property used in reverse, a standard exclusive-selection dropdown
+    pattern. A `label` that doesn't match any item is a silent no-op
+    (defensive against stale persisted state naming an option this version
+    of the dialog no longer has)."""
+    dropdown = inputs.itemById(input_id)
+    for item in dropdown.listItems:
         if item.name == label:
             item.isSelected = True
             return
+
+
+def _select_drivetrain_type(inputs: "adsk.core.CommandInputs", label: str) -> None:
+    _select_dropdown_item(inputs, "drivetrain_type", label)
+
+
+def _collect_persistable_dialog_state(inputs: "adsk.core.CommandInputs") -> Dict[str, object]:
+    """The flip side of _apply_persisted_dialog_state -- gathers every
+    persisted field's CURRENT value right after a successful generation, for
+    ui/state.py's save_generate_dialog_state to write to disk."""
+    fields: Dict[str, object] = {}
+    for input_id in _PERSISTED_BOOL_FIELD_IDS:
+        fields[input_id] = inputs.itemById(input_id).value
+    for input_id in _PERSISTED_STRING_FIELD_IDS:
+        fields[input_id] = inputs.itemById(input_id).value
+    for input_id in _PERSISTED_DROPDOWN_FIELD_IDS:
+        fields[input_id] = inputs.itemById(input_id).selectedItem.name
+    return fields
+
+
+def _apply_persisted_dialog_state(inputs: "adsk.core.CommandInputs", saved: Dict[str, object]) -> None:
+    """Restores every field `save_generate_dialog_state` previously saved
+    for this robot name -- called once at command-creation time, BEFORE
+    _refresh_detected_summary's own auto-detection runs, so a user's past
+    explicit choice always outranks a fresh geometric guess (auto-detection
+    already only fills fields it finds empty -- see
+    _apply_auto_detected_drivetrain's docstring). Missing keys (e.g. a
+    field added to the dialog after this robot's state was last saved) are
+    simply left at their normal default -- never an error."""
+    for input_id in _PERSISTED_BOOL_FIELD_IDS:
+        if input_id in saved:
+            inputs.itemById(input_id).value = bool(saved[input_id])
+    for input_id in _PERSISTED_STRING_FIELD_IDS:
+        if input_id in saved:
+            inputs.itemById(input_id).value = str(saved[input_id])
+    for input_id in _PERSISTED_DROPDOWN_FIELD_IDS:
+        if input_id in saved:
+            _select_dropdown_item(inputs, input_id, str(saved[input_id]))
+    _set_drivetrain_inputs_visibility(inputs)
+    _set_build_chain_inputs_visibility(inputs)
 
 
 def _apply_drivetrain_smart_default_checkboxes(inputs: "adsk.core.CommandInputs") -> None:
@@ -337,6 +459,99 @@ def _apply_drivetrain_smart_default_checkboxes(inputs: "adsk.core.CommandInputs"
     nav2_input = inputs.itemById("include_nav2")
     if not nav2_input.value:
         nav2_input.value = True
+
+
+def _apply_moveit_smart_default_checkbox(inputs: "adsk.core.CommandInputs", robot) -> None:
+    """Nudges "MoveIt 2" checked when `robot` is a suitable single-chain arm
+    -- reuses generators/moveit.py's own detect_moveit_suitability (already
+    written for this exact question: a single unbranched chain from the
+    root link to one leaf link, and no metadata["drivetrain"]) rather than
+    a separate detector, since generate_srdf/etc. already auto-derive
+    base_link/tip_link from the same "one clean chain" shape when none are
+    passed explicitly -- there is nothing left to "detect" beyond
+    suitability itself; the group's NAME is just a label ("arm" by
+    default), not something geometry determines.
+
+    Only checked when drivetrain_type is still "None" -- run AFTER
+    _apply_auto_detected_drivetrain, so a robot the UI just suggested
+    Differential/Mecanum Drive for (checked via the dropdown selection,
+    not robot.metadata -- _apply_auto_detected_drivetrain fills UI fields
+    only, it never mutates `robot` itself) is never also suggested as a
+    MoveIt arm. One-directional like the drivetrain nudge: never unchecks
+    "MoveIt 2" if the robot turns out unsuitable."""
+    if inputs.itemById("drivetrain_type").selectedItem.name != _DRIVETRAIN_NONE:
+        return
+    moveit_input = inputs.itemById("include_moveit")
+    if moveit_input.value:
+        return
+    from ..generators.moveit import detect_moveit_suitability
+
+    if not detect_moveit_suitability(robot):
+        moveit_input.value = True
+
+
+def _set_sensor_inputs_visibility(inputs: "adsk.core.CommandInputs") -> None:
+    """Shows each sensor slot's parent-link/name/update-rate inputs only
+    when that slot's own type dropdown isn't "None" -- same pattern as
+    _set_drivetrain_inputs_visibility, just per-slot instead of a single
+    shared selection."""
+    for slot in _SENSOR_SLOT_IDS:
+        ids = _sensor_slot_input_ids(slot)
+        slot_active = inputs.itemById(ids["type"]).selectedItem.name != _SENSOR_TYPE_NONE
+        for field in ("parent_link", "name", "update_rate"):
+            inputs.itemById(ids[field]).isVisible = slot_active
+
+
+def _build_sensors(inputs: "adsk.core.CommandInputs") -> list:
+    """Reads the sensor{1,2,3}_* inputs and returns the list of
+    `robot_model.Sensor` objects to attach to the Robot before generation --
+    empty list if every slot is "None". Raises ValueError (caught by
+    GenerateCommandExecuteHandler the same way drivetrain validation errors
+    are) naming the offending slot for a missing parent link or a
+    non-numeric update rate.
+
+    Origin is left at Pose.IDENTITY (Sensor's own default) -- exposing a
+    6-field pose offset per slot was judged not worth the dialog clutter for
+    a first version of this UI; a sensor mounted exactly at its parent
+    link's own origin is a reasonable default users can already override by
+    hand-editing the generated URDF/robot script if they need a precise
+    offset. update_rate is the one parameter surfaced (the one
+    `sensors.py`'s generators actually read from `Sensor.parameters` --
+    resolution/FOV/range/etc. all keep their per-type defaults, see
+    generators/sensors.py's own docstrings for exactly what those are).
+    """
+    sensors = []
+    for slot in _SENSOR_SLOT_IDS:
+        ids = _sensor_slot_input_ids(slot)
+        type_label = inputs.itemById(ids["type"]).selectedItem.name
+        if type_label == _SENSOR_TYPE_NONE:
+            continue
+
+        parent_link = inputs.itemById(ids["parent_link"]).value.strip()
+        if not parent_link:
+            raise ValueError(f"Sensor slot {slot} ({type_label}) requires a parent link name.")
+
+        name = inputs.itemById(ids["name"]).value.strip() or f"{_SENSOR_TYPE_LABEL_TO_MODEL_TYPE[type_label]}_{slot}"
+
+        parameters = {}
+        rate_raw = inputs.itemById(ids["update_rate"]).value.strip()
+        if rate_raw:
+            try:
+                parameters["update_rate"] = float(rate_raw)
+            except ValueError:
+                raise ValueError(
+                    f"Sensor slot {slot} ({type_label}) update rate must be a number (got {rate_raw!r})."
+                ) from None
+
+        sensors.append(
+            Sensor(
+                name=name,
+                type=_SENSOR_TYPE_LABEL_TO_MODEL_TYPE[type_label],
+                parent_link=parent_link,
+                parameters=parameters,
+            )
+        )
+    return sensors
 
 
 def _drivetrain_fields_are_empty(inputs: "adsk.core.CommandInputs") -> bool:
@@ -471,6 +686,7 @@ def _refresh_detected_summary(inputs: "adsk.core.CommandInputs") -> None:
         text_input.text = app.format_robot_summary(robot)
         _last_summary_dict = app.robot_summary_as_dict(robot)
         _apply_auto_detected_drivetrain(inputs, robot)
+        _apply_moveit_smart_default_checkbox(inputs, robot)
         _push_summary_to_palette(ui)
     except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
         text_input.text = f"(could not detect links/joints yet: {exc})"
@@ -547,6 +763,28 @@ class GenerateCommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 True,
             )
 
+            # REAL GAP FOUND AND FIXED HERE: fusion_addin/generators/
+            # sensors.py's camera/lidar/imu Gazebo XML + ros_gz_bridge
+            # generation already worked, but nothing in this dialog let a
+            # user actually attach a sensor to a link -- see
+            # _build_sensors'/_set_sensor_inputs_visibility's own docstrings
+            # for the fixed-3-slot design and what's/isn't configurable.
+            for slot in _SENSOR_SLOT_IDS:
+                ids = _sensor_slot_input_ids(slot)
+                sensor_dropdown = inputs.addDropDownCommandInput(
+                    ids["type"], f"Sensor {slot}", adsk.core.DropDownStyles.TextListDropDownStyle
+                )
+                sensor_dropdown.listItems.add(_SENSOR_TYPE_NONE, True)
+                sensor_dropdown.listItems.add(_SENSOR_TYPE_CAMERA, False)
+                sensor_dropdown.listItems.add(_SENSOR_TYPE_LIDAR, False)
+                sensor_dropdown.listItems.add(_SENSOR_TYPE_IMU, False)
+                inputs.addStringValueInput(
+                    ids["parent_link"], f"  Sensor {slot} parent link name", ""
+                )
+                inputs.addStringValueInput(ids["name"], f"  Sensor {slot} name (optional)", "")
+                inputs.addStringValueInput(ids["update_rate"], f"  Sensor {slot} update rate Hz (optional)", "")
+            _set_sensor_inputs_visibility(inputs)
+
             # REAL GAP FOUND AND FIXED HERE: robot.metadata["drivetrain"] --
             # the convention ros2_control.py/nav2.py use to recognize a
             # differential-drive or mecanum-drive mobile base (see
@@ -612,7 +850,16 @@ class GenerateCommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             launch_input.listItems.add(_LAUNCH_DISPLAY, False)
             launch_input.listItems.add(_LAUNCH_GAZEBO, False)
             launch_input.listItems.add(_LAUNCH_NAV2, False)
+            launch_input.listItems.add(_LAUNCH_BRINGUP, False)
             _set_build_chain_inputs_visibility(inputs)
+
+            # Restore this robot's previously-saved dialog state (if any),
+            # BEFORE _refresh_detected_summary's auto-detection runs below --
+            # see _apply_persisted_dialog_state's docstring for why a past
+            # explicit choice must outrank a fresh guess.
+            saved_dialog_state = state.load_generate_dialog_state(default_name)
+            if saved_dialog_state:
+                _apply_persisted_dialog_state(inputs, saved_dialog_state)
 
             # Detected Links/Joints readback (task item 3). addTextBoxCommandInput
             # signature confirmed via help.autodesk.com (id, name,
@@ -703,6 +950,23 @@ class GenerateInputChangedHandler(adsk.core.InputChangedEventHandler):
             _apply_drivetrain_smart_default_checkboxes(args.inputs)
         elif args.input.id == "build_in_wsl_after_generate":
             _set_build_chain_inputs_visibility(args.inputs)
+        elif args.input.id in {_sensor_slot_input_ids(slot)["type"] for slot in _SENSOR_SLOT_IDS}:
+            _set_sensor_inputs_visibility(args.inputs)
+
+
+def _validate_generated_package(package_dir: Path) -> list:
+    """Runs the same checks "Validate ROS 2 Package" (validate_command.py)
+    does, against the package that was JUST generated -- so a structural or
+    URDF problem is caught immediately, before the optional WSL build step
+    spends real time building something that was doomed anyway. Returns a
+    flat list of problem strings (empty == clean), same convention as
+    ros2_tools.validate's own functions."""
+    problems = validate_package_structure(package_dir)
+    urdf_dir = package_dir / "urdf"
+    if urdf_dir.is_dir():
+        for urdf_file in sorted(p for p in urdf_dir.iterdir() if p.is_file() and p.suffix in (".urdf", ".xacro")):
+            problems.extend(f"{urdf_file.name}: {p}" for p in validate_urdf_file(urdf_file))
+    return problems
 
 
 def _build_and_maybe_launch_in_wsl(
@@ -818,6 +1082,7 @@ class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
 
             try:
                 drivetrain = _build_drivetrain_metadata(inputs)
+                sensors = _build_sensors(inputs)
             except ValueError as exc:
                 ui.messageBox(f"Fusion2ROS: {exc}")
                 return
@@ -831,6 +1096,7 @@ class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
                 # _build_drivetrain_metadata's docstring for why this exists
                 # and ros2_control.py's module docstring for the shape.
                 robot.metadata["drivetrain"] = drivetrain
+            robot.sensors.extend(sensors)
 
             def _on_progress(stage_description: str, step: int, total_steps: int) -> None:
                 if progress_dialog.maximumValue != total_steps:
@@ -858,14 +1124,26 @@ class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
                 )
 
             state.set_last_generated(package_dir, robot_name)
+            state.save_generate_dialog_state(robot_name, _collect_persistable_dialog_state(inputs))
             report_lines = [f"Fusion2ROS: generated ROS 2 package at:\n{package_dir}"]
 
-            if inputs.itemById("build_in_wsl_after_generate").value:
-                wsl_ros_ws_src = inputs.itemById("wsl_ros_ws_src_for_build").value.strip() or DEFAULT_WSL_ROS_WS_SRC
-                launch_choice = inputs.itemById("launch_after_build").selectedItem.name
+            progress_dialog.message = "Validating generated package..."
+            validation_problems = _validate_generated_package(package_dir)
+            if validation_problems:
                 report_lines.append(
-                    _build_and_maybe_launch_in_wsl(progress_dialog, package_dir, robot_name, wsl_ros_ws_src, launch_choice, include_gazebo)
+                    "Validation found problems (fix these before building/launching):\n"
+                    + "\n".join(f"- {p}" for p in validation_problems)
                 )
+
+            if inputs.itemById("build_in_wsl_after_generate").value:
+                if validation_problems:
+                    report_lines.append("Skipped the WSL build step because validation found problems above.")
+                else:
+                    wsl_ros_ws_src = inputs.itemById("wsl_ros_ws_src_for_build").value.strip() or DEFAULT_WSL_ROS_WS_SRC
+                    launch_choice = inputs.itemById("launch_after_build").selectedItem.name
+                    report_lines.append(
+                        _build_and_maybe_launch_in_wsl(progress_dialog, package_dir, robot_name, wsl_ros_ws_src, launch_choice, include_gazebo)
+                    )
 
             ui.messageBox("\n\n".join(report_lines))
         except app.GenerationCancelled:

@@ -569,6 +569,21 @@ def test_generate_ros_package_all_four_together_on_diff_drive(tmp_path):
     assert (package_dir / "config" / "controllers.yaml").exists()
     assert (package_dir / "worlds" / "empty.sdf").exists()
     assert (package_dir / "config" / "nav2_params.yaml").exists()
+    # Real gap this combined-flag test also covers: Nav2 needs a
+    # robot_state_publisher-providing base launch combined with it (see
+    # generators/bringup.py) -- both must exist and name gazebo.launch.py
+    # as the base since include_gazebo=True.
+    bringup_text = (package_dir / "launch" / "bringup.launch.py").read_text()
+    assert '"gazebo.launch.py"' in bringup_text
+    assert '"nav2_bringup.launch.py"' in bringup_text
+
+
+def test_generate_ros_package_without_nav2_or_moveit_has_no_bringup_launch(tmp_path):
+    robot = make_diff_drive_robot()
+    package_dir = generate_ros_package(robot, {}, tmp_path, include_gazebo=True)
+    assert not (package_dir / "launch" / "bringup.launch.py").exists()
+
+
 # attach_collision_proxies
 # ---------------------------------------------------------------------------
 

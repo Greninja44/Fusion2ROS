@@ -470,6 +470,15 @@ def generate_ros_package(
         extra_files["launch/nav2_bringup.launch.py"] = generate_nav2_bringup_launch(robot)
         extra_files["config/map.yaml"] = generate_map_yaml_stub(robot)
 
+    if include_moveit or include_nav2:
+        from .generators.bringup import generate_bringup_launch
+
+        bringup_launch = generate_bringup_launch(
+            robot, include_ros2_control, include_gazebo, include_moveit, include_nav2
+        )
+        if bringup_launch is not None:
+            extra_files["launch/bringup.launch.py"] = bringup_launch
+
     if fragments:
         urdf_xacro = splice_xml_fragments(urdf_xacro, fragments)
 
