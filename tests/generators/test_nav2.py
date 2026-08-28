@@ -827,10 +827,14 @@ def test_real_nav2_servers_configure_cleanly_against_generated_params(tmp_path):
                 text=True,
                 timeout=20,
             )
-            assert "Transitioning successful" in result.stdout, (
-                f"{node_name} failed to configure against the generated nav2_params.yaml.\n"
-                f"lifecycle set stdout: {result.stdout}\nstderr: {result.stderr}"
-            )
+            if "Transitioning successful" not in result.stdout:
+                _terminate(proc)
+                node_output = proc.stdout.read() if proc.stdout else "<no output captured>"
+                raise AssertionError(
+                    f"{node_name} failed to configure against the generated nav2_params.yaml.\n"
+                    f"lifecycle set stdout: {result.stdout}\nstderr: {result.stderr}\n"
+                    f"{node_name}'s own console output:\n{node_output}"
+                )
             assert proc.poll() is None, f"{node_name} crashed during configure"
     finally:
         for _, proc in procs:
@@ -878,10 +882,14 @@ def test_map_yaml_stub_configure_fails_against_real_map_server(tmp_path):
             text=True,
             timeout=20,
         )
-        assert "Transitioning failed" in result.stdout + result.stderr, (
-            "expected map_server's configure transition to FAIL against the "
-            f"placeholder stub (image file does not exist).\n"
-            f"stdout: {result.stdout}\nstderr: {result.stderr}"
-        )
+        if "Transitioning failed" not in result.stdout + result.stderr:
+            _terminate(proc)
+            node_output = proc.stdout.read() if proc.stdout else "<no output captured>"
+            raise AssertionError(
+                "expected map_server's configure transition to FAIL against the "
+                f"placeholder stub (image file does not exist).\n"
+                f"lifecycle set stdout: {result.stdout}\nstderr: {result.stderr}\n"
+                f"map_server's own console output:\n{node_output}"
+            )
     finally:
         _terminate(proc)
