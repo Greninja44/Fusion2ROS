@@ -21,11 +21,35 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Union
+from xml.sax.saxutils import escape, quoteattr
 
 from robot_model import Robot
 
 MeshSource = Union[bytes, Path]
 FileContent = Union[str, bytes]
+
+
+def _ensure_within(base_dir: Path, candidate: Path, label: str) -> None:
+    """Raise ValueError if `candidate` would land outside `base_dir`.
+
+    `pathlib`'s `/` operator silently discards the left-hand side when the
+    right-hand side is itself absolute (`Path("/out") / "/etc/passwd" ==
+    Path("/etc/passwd")`), and a plain `..` component walks back out of
+    `base_dir` just as it would in a shell -- either way, a robot name or a
+    mesh_files/extra_files key that isn't a clean relative path can silently
+    write (or, since `generate_package` calls `shutil.rmtree` on a
+    pre-existing `pkg_dir`, delete) something far outside the package
+    directory this function promises to confine itself to.
+    """
+    base_resolved = base_dir.resolve()
+    candidate_resolved = candidate.resolve()
+    try:
+        candidate_resolved.relative_to(base_resolved)
+    except ValueError:
+        raise ValueError(
+            f"{label} must resolve to a path inside {base_dir}, got {candidate!r} "
+            f"(resolves to {candidate_resolved})"
+        ) from None
 
 
 def generate_package(
@@ -67,6 +91,7 @@ def generate_package(
     """
     output_dir = Path(output_dir)
     pkg_dir = output_dir / robot.name
+    _ensure_within(output_dir, pkg_dir, f"Robot.name {robot.name!r}")
 
     if pkg_dir.exists():
         shutil.rmtree(pkg_dir)
@@ -103,6 +128,7 @@ def generate_package(
 def _write_extra_files(extra_files: Dict[str, FileContent], pkg_dir: Path) -> None:
     for rel_path, content in extra_files.items():
         dest = pkg_dir / rel_path
+        _ensure_within(pkg_dir, dest, f"extra_files key {rel_path!r}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(content, str):
             dest.write_text(content, encoding="utf-8")
@@ -135,16 +161,21 @@ def _write_package_xml(robot: Robot, pkg_dir: Path, extra_depends: List[str]) ->
     for dep in extra_depends:
         if dep not in depends:
             depends.append(dep)
-    depend_lines = "\n".join(f"  <depend>{d}</depend>" for d in depends)
+    # robot.name/version/description/maintainer_*/license_name are free-form
+    # user/metadata text (a Fusion project description, an author's name,
+    # ...), not markup -- XML-escape every value landing in element text or
+    # an attribute so a name like "Arm & Gripper" or a maintainer "O'Brien"
+    # can't produce malformed XML (or, worse, inject a sibling element).
+    depend_lines = "\n".join(f"  <depend>{escape(d)}</depend>" for d in depends)
 
     content = f"""<?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>{robot.name}</name>
-  <version>{version}</version>
-  <description>{description}</description>
-  <maintainer email="{maintainer_email}">{maintainer_name}</maintainer>
-  <license>{license_name}</license>
+  <name>{escape(str(robot.name))}</name>
+  <version>{escape(str(version))}</version>
+  <description>{escape(str(description))}</description>
+  <maintainer email={quoteattr(str(maintainer_email))}>{escape(str(maintainer_name))}</maintainer>
+  <license>{escape(str(license_name))}</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
@@ -183,6 +214,7 @@ def _write_urdf_xacro(robot: Robot, urdf_dir: Path, urdf_xacro: str) -> None:
 def _write_meshes(mesh_files: Dict[str, MeshSource], meshes_dir: Path) -> None:
     for rel_name, source in mesh_files.items():
         dest = meshes_dir / rel_name
+        _ensure_within(meshes_dir, dest, f"mesh_files key {rel_name!r}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(source, Path):
             shutil.copyfile(source, dest)
@@ -206,9 +238,14 @@ from launch.substitutions import Command, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
-PACKAGE_NAME = "{robot.name}"
-URDF_XACRO_FILE = "{robot.name}.urdf.xacro"
-RVIZ_CONFIG_FILE = "{robot.name}.rviz"
+# robot.name is embedded via repr() rather than naive f-string quoting: it is
+# free-form text (no character restrictions in robot_model.schema), and a
+# name containing a `"` -- e.g. `weird"name` -- inside a naively-quoted
+# f-string produces a Python file that fails to parse at all. repr() always
+# emits a syntactically valid string literal for any str value.
+PACKAGE_NAME = {robot.name!r}
+URDF_XACRO_FILE = {(robot.name + ".urdf.xacro")!r}
+RVIZ_CONFIG_FILE = {(robot.name + ".rviz")!r}
 
 
 def generate_launch_description():
