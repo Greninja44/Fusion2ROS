@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Union
 
 ProgressCallback = Callable[[str, int, int], None]
 CancelCheck = Callable[[], bool]
@@ -23,7 +23,7 @@ from robot_model import Robot, JointType
 
 from .extraction.converter import build_robot_model
 from .extraction.interface import FusionDesignReader
-from .generators.package import generate_package
+from .generators.package import PackageManifest, generate_package
 from .generators.urdf import generate_urdf_xacro
 
 _INVALID_PACKAGE_NAME_CHARS = re.compile(r"[^a-z0-9_]+")
@@ -274,11 +274,21 @@ def generate_ros_package(
     use_bounding_box_collision: bool = False,
     progress_callback: Optional[ProgressCallback] = None,
     should_cancel: Optional[CancelCheck] = None,
-) -> Path:
+    dry_run: bool = False,
+) -> Union[Path, PackageManifest]:
     """robot -> URDF/Xacro text -> full ROS 2 package tree under
     output_dir/<robot.name>/. Raises PipelineError (not a bare ValueError)
     with the full itemized list if any joint is missing required limits, or
     if a requested optional output (MoveIt/Nav2) isn't suitable for `robot`.
+
+    dry_run (default False): forwarded to `generate_package` -- every stage
+    up to and including building `extra_files`/`fragments` (URDF generation,
+    ros2_control/Gazebo/MoveIt/Nav2 config, actuator-limit and suitability
+    checks) still runs exactly as normal, so a caller gets the same
+    PipelineError it would from a real run for the same input. Only the
+    final "write to disk" stage is skipped -- see `generate_package`'s own
+    dry_run docstring for what's returned instead (a `PackageManifest`, not
+    a `Path`) and exactly which on-disk-path validation still happens.
 
     The four `include_*` flags mirror the Fusion UI's planned output
     checkboxes (URDF/Xacro and the base ROS 2 package are always produced;
@@ -489,7 +499,13 @@ def generate_ros_package(
     # rather than making either side guess the other's convention.
     package_mesh_files = {Path(path).name: path for path in mesh_files.values()}
     return generate_package(
-        robot, urdf_xacro, package_mesh_files, output_dir, extra_files=extra_files, extra_depends=extra_depends
+        robot,
+        urdf_xacro,
+        package_mesh_files,
+        output_dir,
+        extra_files=extra_files,
+        extra_depends=extra_depends,
+        dry_run=dry_run,
     )
 
 
