@@ -379,7 +379,21 @@ def generate_world_sdf(world_name: str = "empty") -> str:
     IMU sensor specifically additionally needs gz-sim-imu-system (confirmed
     the same way). Both plugins' exact filename/name and the Sensors
     plugin's <render_engine>ogre2</render_engine> child are copied verbatim
-    from the same real installed default.sdf referenced above. Contact and
+    from the same real installed default.sdf referenced above.
+
+    NavSat and ForceTorque system plugins are ALSO included, for the same
+    reason and confirmed the same way, now that sensors.py supports
+    "gps"/"navsat" and "force_torque" sensor types: gz-sim-navsat-system
+    (gz::sim::systems::NavSat) and gz-sim-forcetorque-system
+    (gz::sim::systems::ForceTorque) are each confirmed loaded in this
+    machine's own installed gz-sim example worlds that carry a live sensor
+    of the matching type (.../gz-sim/worlds/spherical_coordinates.sdf and
+    .../gz-sim/worlds/sensors.sdf respectively -- both read live in this
+    session). Loading all five sensor-support plugins unconditionally
+    (rather than only when a robot actually has a matching sensor type) is
+    a deliberate simplification: this function takes no `robot` argument,
+    a world plugin with no matching sensor in the spawned model is simply
+    inert, and gz-sim doesn't warn or error for one. Contact and
     AirPressure are still dropped -- nothing this project generates uses
     either.
 
@@ -399,6 +413,8 @@ def generate_world_sdf(world_name: str = "empty") -> str:
       <render_engine>ogre2</render_engine>
     </plugin>
     <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat"/>
+    <plugin filename="gz-sim-forcetorque-system" name="gz::sim::systems::ForceTorque"/>
 
     <gravity>0 0 -9.8</gravity>
 
