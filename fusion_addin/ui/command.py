@@ -61,6 +61,7 @@ from ros2_tools.validate.urdf import validate_urdf_file
 from .. import app
 from ..extraction.drivetrain_detect import detect_drivetrain
 from ..extraction.fusion_adapter import FusionDesignReaderAdapter
+from ..generators.gazebo import uses_gz_ros2_control_fallback
 from ..generators.mesh import export_link_meshes
 from . import state
 
@@ -1126,6 +1127,16 @@ class GenerateCommandExecuteHandler(adsk.core.CommandEventHandler):
             state.set_last_generated(package_dir, robot_name)
             state.save_generate_dialog_state(robot_name, _collect_persistable_dialog_state(inputs))
             report_lines = [f"Fusion2ROS: generated ROS 2 package at:\n{package_dir}"]
+
+            if include_gazebo and uses_gz_ros2_control_fallback(robot):
+                report_lines.append(
+                    "Warning: this robot has no differential-drive metadata, so the "
+                    "generated Gazebo config uses the gz_ros2_control plugin rather than "
+                    "gz-sim's native DiffDrive. gz_ros2_control has a confirmed upstream "
+                    "crash (SIGSEGV on startup) on some gz-sim versions -- see "
+                    "docs/ARCHITECTURE.md's \"Gazebo\" section before relying on gazebo.launch.py "
+                    "for this robot."
+                )
 
             progress_dialog.message = "Validating generated package..."
             validation_problems = _validate_generated_package(package_dir)

@@ -41,6 +41,7 @@ from fusion_addin.generators.gazebo import (
     generate_gazebo_xml,
     generate_spawn_launch,
     generate_world_sdf,
+    uses_gz_ros2_control_fallback,
 )
 from robot_model import Geometry, Inertial, Joint, JointType, Link, Material, Pose, Robot
 
@@ -395,6 +396,19 @@ def test_spawn_launch_references_expected_ros_gz_sim_names():
 def test_spawn_launch_is_deterministic():
     robot = make_two_link_arm()
     assert generate_spawn_launch(robot) == generate_spawn_launch(robot)
+
+
+# --- uses_gz_ros2_control_fallback ------------------------------------------
+
+
+def test_arm_with_no_drivetrain_uses_gz_ros2_control_fallback():
+    robot = make_two_link_arm()
+    assert uses_gz_ros2_control_fallback(robot) is True
+
+
+def test_differential_drive_robot_does_not_use_gz_ros2_control_fallback():
+    robot = make_diff_drive_rover()
+    assert uses_gz_ros2_control_fallback(robot) is False
 
 
 def test_spawn_launch_appends_package_share_parent_to_gz_sim_resource_path():
