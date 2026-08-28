@@ -251,9 +251,18 @@ Fusion 360 process, are in `docs/ARCHITECTURE.md`'s "Status" sections.
   an external bug, not something fixable from this repo. The Fusion UI
   warns about it in the generation report when it applies, rather than
   letting you discover it via a crash.
-- **Nav2's `nav2_bringup` package itself was never exercised end-to-end**
-  on the machine this was built on (only individually-installed Nav2
-  servers were) — see `docs/ARCHITECTURE.md`'s Nav2 status note.
+- **Nav2's `nav2_bringup` package itself is still not exercised end-to-end** —
+  confirmed genuinely unavailable in this sandbox (not on the apt mirror at
+  all, and no root to install anything). As the closest substitute, all 7
+  individual Nav2 servers this project's `nav2_params.yaml` configures were
+  real-verified via `ros2 lifecycle set ... configure` against real,
+  installed Nav2 binaries: 6 of 7 (`map_server`, `amcl`, `planner_server`,
+  `behavior_server`, `bt_navigator`, `waypoint_follower`) configure cleanly,
+  4 of those 6 also `activate` cleanly. `controller_server`'s `configure`
+  reproducibly crashes on this machine's installed Nav2 1.5.1 build with a
+  root-caused, environment-level `nav2_costmap_2d` defect, confirmed
+  independent of any parameter value this repo generates — see
+  `docs/ARCHITECTURE.md`'s Nav2 status note for the full write-up.
 - **Install is a symlink or a copy-script**, not a packaged Fusion 360
   add-in you install from the Autodesk App Store — see
   [Getting started](#getting-started).
