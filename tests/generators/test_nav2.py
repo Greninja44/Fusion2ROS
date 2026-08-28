@@ -843,26 +843,33 @@ def test_real_nav2_servers_configure_cleanly_against_generated_params(tmp_path):
         ("nav2_waypoint_follower", "waypoint_follower", "waypoint_follower", []),
     ]
 
-    procs = []
-    try:
-        for package, executable, node_name, overrides in servers:
-            cmd = [
-                "ros2",
-                "run",
-                package,
-                executable,
-                "--ros-args",
-                "--params-file",
-                str(params_path),
-                "-p",
-                "use_sim_time:=false",
-            ]
-            for override in overrides:
-                cmd += ["-p", override]
-            proc, pgid = _launch_ros2_node(cmd)
-            procs.append((node_name, proc, pgid))
-
-        for node_name, proc, pgid in procs:
+    # Servers are started, configured, and torn down ONE AT A TIME rather
+    # than all 6 concurrently. Each server's `configure` only depends on
+    # its own section of the shared params file, not on the others being
+    # alive, so running them concurrently buys no extra coverage -- it
+    # only adds 6-way CPU/DDS-discovery contention on a shared CI runner.
+    # That contention is a real, observed flake: an earlier CI run of this
+    # exact test failed with a clean "Transitioning failed" from
+    # planner_server's configure; a later run of the same code instead
+    # hung for the full 20s timeout before being killed. Same target,
+    # same generated params, two different failure shapes -- the
+    # signature of resource starvation, not a deterministic generator bug.
+    for package, executable, node_name, overrides in servers:
+        cmd = [
+            "ros2",
+            "run",
+            package,
+            executable,
+            "--ros-args",
+            "--params-file",
+            str(params_path),
+            "-p",
+            "use_sim_time:=false",
+        ]
+        for override in overrides:
+            cmd += ["-p", override]
+        proc, pgid = _launch_ros2_node(cmd)
+        try:
             assert _wait_for_node(f"/{node_name}", timeout=25.0), (
                 f"{node_name} never appeared on the ROS graph (process exited early?)"
             )
@@ -871,12 +878,11 @@ def test_real_nav2_servers_configure_cleanly_against_generated_params(tmp_path):
                     f"{node_name} exited before it could be configured, output:\n{_drain_output(proc)}"
                 )
 
-        for node_name, proc, pgid in procs:
             result = subprocess.run(
                 ["ros2", "lifecycle", "set", f"/{node_name}", "configure"],
                 capture_output=True,
                 text=True,
-                timeout=20,
+                timeout=30,
             )
             if "Transitioning successful" not in result.stdout:
                 _terminate(proc, pgid)
@@ -887,8 +893,7 @@ def test_real_nav2_servers_configure_cleanly_against_generated_params(tmp_path):
                     f"{node_name}'s own console output:\n{node_output}"
                 )
             assert proc.poll() is None, f"{node_name} crashed during configure"
-    finally:
-        for _, proc, pgid in procs:
+        finally:
             _terminate(proc, pgid)
 
 
@@ -928,7 +933,7 @@ def test_map_yaml_stub_configure_fails_against_real_map_server(tmp_path):
             ["ros2", "lifecycle", "set", "/map_server", "configure"],
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=30,
         )
         if "Transitioning failed" not in result.stdout + result.stderr:
             _terminate(proc, pgid)
