@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/batman/Fusion2ROS/build/sample_arm/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

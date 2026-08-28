@@ -1,5 +1,0 @@
-source;share/sample_rover/local_setup.bash
-source;share/sample_rover/local_setup.dsv
-source;share/sample_rover/local_setup.fish
-source;share/sample_rover/local_setup.sh
-source;share/sample_rover/local_setup.zsh
