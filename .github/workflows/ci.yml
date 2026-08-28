@@ -10,6 +10,7 @@ jobs:
   unit-tests:
     name: Unit tests (no ROS)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +27,7 @@ jobs:
   ros-integration:
     name: Unit tests + colcon build (ROS 2 Jazzy)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

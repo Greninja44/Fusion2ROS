@@ -114,7 +114,14 @@ class _FakeInputs:
         for slot in cmd._SENSOR_SLOT_IDS:
             type_id = cmd._sensor_slot_input_ids(slot)["type"]
             self._values[type_id] = _FakeDropDown(
-                (cmd._SENSOR_TYPE_NONE, cmd._SENSOR_TYPE_CAMERA, cmd._SENSOR_TYPE_LIDAR, cmd._SENSOR_TYPE_IMU),
+                (
+                    cmd._SENSOR_TYPE_NONE,
+                    cmd._SENSOR_TYPE_CAMERA,
+                    cmd._SENSOR_TYPE_LIDAR,
+                    cmd._SENSOR_TYPE_IMU,
+                    cmd._SENSOR_TYPE_DEPTH_CAMERA,
+                    cmd._SENSOR_TYPE_GPS,
+                ),
                 (string_values or {}).get(type_id, cmd._SENSOR_TYPE_NONE),
             )
 

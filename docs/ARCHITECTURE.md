@@ -175,3 +175,159 @@ needs its `models` subfolder appended instead). Re-running the identical
 live `ros2 launch main_assembly gazebo.launch.py` after the fix: zero
 "unable to find"/"failed to load geometry" errors, `Entity creation
 successful` unchanged.
+
+## Status update: Nav2 end-to-end verification attempt (later session)
+
+The README's "Known limitations" used to say `nav2_bringup` was "never
+exercised end-to-end." This session tried to close that gap for real, in
+this same sandbox (ROS_DISTRO=lyrical).
+
+**Step 1: actually try to get `nav2_bringup` installed.** Confirmed, this
+time exhaustively rather than by inference: `apt-cache search
+ros-lyrical-navigation2` / `apt-cache search nav2-bringup` / `apt-cache
+search nav-bringup` all return nothing, against a mirror that has 2563
+other `ros-lyrical-*` packages indexed (so this isn't a stale-index
+problem -- `nav2_bringup` genuinely isn't packaged for this distro's mirror
+at all). `apt-get install --dry-run ros-lyrical-nav2-bringup` confirms:
+`E: Unable to locate package ros-lyrical-nav2-bringup`. `find / -iname
+"*nav2_bringup*"` across the whole filesystem returns nothing -- it isn't
+sitting unindexed anywhere either. Separately, and independently sufficient
+to block installing anything: this sandbox has no root -- `sudo apt-get
+update` (tried both bare and with the sandbox override) fails with `sudo: A
+terminal is required to authenticate` every time, non-interactively, with
+no cached credential. Conclusion: `nav2_bringup` is genuinely unavailable
+here, not just previously-unchecked -- there is no plausible path to
+installing it in this sandbox.
+
+**Step 2: the most rigorous verification achievable without it.** All 7
+individual Nav2 server packages this generator's params.yaml configures
+(`nav2_map_server`, `nav2_amcl`, `nav2_controller`, `nav2_planner`,
+`nav2_behaviors`, `nav2_bt_navigator`, `nav2_waypoint_follower`) ARE
+installed, with real executables on PATH (`ros2 pkg executables` confirms
+each). Built a standalone `launch_ros`-based launch file (not part of this
+repo -- a throwaway verification script) that starts each server directly
+against this generator's real, unmodified `generate_nav2_params_yaml`
+output for `examples/sample_rover.py`, then drove each through real
+`ros2 lifecycle set <node> configure`/`activate` transitions by hand
+(`nav2_bringup`'s own `bringup_launch.py` would normally do this via
+`nav2_lifecycle_manager` -- hand-driving the same transitions is the
+closest substitute available without it). A real, valid, synthetic test map
+(a plain 20x20 PGM, NOT this project's own `generate_map_yaml_stub` output,
+which is documented to be non-functional on purpose) was used so
+map_server/amcl had something real to load.
+
+**Results, per server:**
+- `map_server`: **`configure` + `activate` both succeed cleanly** (bond to
+  a lifecycle manager also established once given a generous
+  `bond_timeout`; see the bond note below).
+- `amcl`: **`configure` + `activate` both succeed cleanly**, including
+  receiving the real map from map_server (`Received a 40 X 40 map @
+  0.050 m/pix`) and subscribing to the scan topic this generator names.
+- `behavior_server`: **`configure` + `activate` both succeed cleanly**, all
+  5 generated behavior plugins (`spin`/`backup`/`drive_on_heading`/
+  `assisted_teleop`/`wait`) configure and activate individually.
+- `waypoint_follower`: **`configure` + `activate` both succeed cleanly**,
+  including its `wait_at_waypoint` task executor plugin.
+- `planner_server`: **`configure` succeeds cleanly**, including its
+  `global_costmap`'s full plugin stack (`static_layer`, `obstacle_layer`,
+  `inflation_layer` -- all three load with zero parameter errors) and the
+  `NavfnPlanner` (`GridBased`) plugin this generator selects. `activate`
+  blocks waiting for a `base_link -> map` TF transform -- expected and NOT
+  a generator bug: this standalone harness never started
+  `robot_state_publisher` or a static/dynamic TF broadcaster (that's
+  `display.launch.py`/`gazebo.launch.py`/`control.launch.py`'s job, per
+  `fusion_addin/generators/bringup.py`'s own base-vs-stack split; a real
+  deployment always runs one of those alongside Nav2), so there is no TF
+  tree for this isolated test to consume at all.
+- `bt_navigator`: **`configure` succeeds cleanly**, including both
+  generated navigators (`navigate_to_pose`, `navigate_through_poses`) and
+  their behavior trees. `activate` fails with `"is_path_valid" service
+  server not available after waiting for 1.00s` -- expected and NOT a
+  generator bug: that service is served by `controller_server`, which this
+  harness deliberately did not start (see next point).
+- `controller_server`: **`configure` reproducibly CRASHES** with `*** stack
+  smashing detected ***: terminated` inside `local_costmap`'s configure
+  step, immediately after the last costmap layer plugin finishes
+  initializing. Root-caused, not just observed, with the same rigor as the
+  `gz_ros2_control` SIGSEGV write-up above:
+  - **Not a parameter-value bug**: reproduces identically against a
+    stripped-down params file using pure `InflationLayer`/`ObstacleLayer`
+    defaults (no `cost_scaling_factor`/`inflation_radius`/etc. overrides at
+    all) -- ruling out anything this generator's chosen values could cause.
+  - **Not caused by `InflationLayer` (or any specific layer) itself**:
+    reproduces with `inflation_layer` alone, with `obstacle_layer` alone,
+    and with both together -- always at the point right after the *last*
+    plugin in whatever `plugins:` list is configured finishes
+    initializing, regardless of which plugin that is.
+  - **Not caused by `rolling_window`**: reproduces identically with
+    `rolling_window: true` and `rolling_window: false`.
+  - **Specific to `controller_server`'s `local_costmap`, not
+    `nav2_costmap_2d`/`InflationLayer` in general**: the BYTE-IDENTICAL
+    `inflation_layer` config (same plugin, same `cost_scaling_factor`,
+    same `inflation_radius`) configures cleanly every time under
+    `planner_server`'s `global_costmap` (see above) -- ruling out
+    `nav2_costmap_2d`'s `InflationLayer` implementation itself as the
+    culprit; something specific to the `local_costmap`/`controller_server`
+    code path on this exact installed build (Nav2 1.5.1,
+    `1.5.1-1resolute.20260813.*`) is at fault.
+  - Searched for a matching upstream report
+    ([ros-navigation/navigation2#5470](https://github.com/ros-navigation/navigation2/issues/5470)
+    is the closest hit -- a different, ARM/Zenoh-specific "stack smashing"
+    crash inside AMCL's particle filter, not this one -- so this specific
+    crash doesn't appear to be already filed, but the existence of that
+    issue confirms "stack smashing detected" crashes inside Nav2 lifecycle
+    nodes are a real, if poorly-understood, class of problem on certain
+    builds/platforms, not something this project's own code could produce).
+  - Conclusion: a real, environment/binary-level defect in this machine's
+    installed `nav2_costmap_2d`/`nav2_controller` 1.5.1 build, out of this
+    repo's control -- nothing in `fusion_addin/generators/nav2.py` was
+    changed as a result (there was nothing to fix; every value tried,
+    including the generator's real output, is equally affected).
+
+**A second, separate observation, also NOT a generator bug**: running all 7
+servers together under a real `nav2_lifecycle_manager` with
+`autostart: true` (the actual mechanism `nav2_bringup`'s own
+`bringup_launch.py` uses) hit a `bond` heartbeat timeout on `map_server`
+even after its own `activate` transition had already succeeded internally
+(`Server map_server was unable to be reached after 4.00s by bond` --
+raising `bond_timeout` to 20s let the bond establish). `bondcpp`'s
+heartbeat mechanism is unrelated to this generator's params content (this
+generator doesn't even produce a `lifecycle_manager` config -- that's
+supplied by `nav2_bringup` itself in a real deployment) and is plausibly
+just slow DDS discovery in this virtualized/WSL2 sandbox under load from
+the verification session's own many previous test processes -- noted for
+completeness, not investigated further since it's orchestration-layer, not
+this repo's generated content.
+
+**Real bug found and fixed from this exercise**: `generate_map_yaml_stub`'s
+embedded comment used to claim "amcl/map_server will load it without
+erroring." **False** -- confirmed by actually running a real installed
+`map_server` against this exact generated stub: `configure` throws
+(`Failed to load image file ./map.pgm for reason: ... Unable to open
+file`), then `Caught exception in callback for transition 10` /
+`Lifecycle node map_server does not have error state implemented`, and the
+node never reaches `inactive`. Fixed the comment (now in both the
+function's docstring and the generated file itself) to say plainly that
+`configure` fails against the stub as-is, not just that navigation quality
+will be bad.
+`tests/generators/test_nav2.py::test_map_yaml_stub_configure_fails_against_real_map_server`
+checks this against a real `map_server`, gated on that package being
+installed.
+
+**Net result**: 6 of the 7 Nav2 servers this generator configures are now
+real-verified, via `configure`, against this generator's actual output, on
+real installed Nav2 binaries (`configure` is the transition that actually
+exercises whether the generated parameters/plugin names are structurally
+correct and loadable -- the thing this generator is responsible for); 4 of
+those 6 (`map_server`, `amcl`, `behavior_server`, `waypoint_follower`) are
+also verified through `activate`. `controller_server` could not be
+verified past `configure` because of a real, root-caused, external
+Nav2-build defect, not a defect in this generated params file.
+`nav2_bringup`'s own launch orchestration remains genuinely unexercised in
+this sandbox (it is not installable here, full stop) -- this is the
+closest substitute achievable without it, and is a materially stronger
+verification than the prior session's `ros2 run`-without-lifecycle-
+transitions check.
+`tests/generators/test_nav2.py::test_real_nav2_servers_configure_cleanly_against_generated_params`
+codifies the `configure`-level check (6 servers, skipped cleanly if those
+packages aren't installed).

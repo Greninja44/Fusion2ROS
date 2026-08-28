@@ -66,25 +66,43 @@ there:
   on your machine:** make `FusionAddins/Fusion2ROS` a directory symlink into
   this repo's `fusion_addin/` folder over the WSL UNC path — edits made in
   WSL are then visible to Fusion instantly, no separate sync step.
-- **Fallback (always works):** `python3 -m bridge.windows.sync_addin`
-  (add `--watch` to keep mirroring on every save) copies `fusion_addin/`,
-  plus the three repo-root packages it imports by absolute name
-  (`robot_model/`, `bridge/windows/`, `ros2_tools/validate/`), into
-  `FusionAddins/Fusion2ROS`. Re-run it after every edit unless you use
-  `--watch`.
+- **Fallback (always works), and now a single command:**
+  `python3 -m bridge.windows.sync_addin`. It copies `fusion_addin/`, plus
+  the three repo-root packages it imports by absolute name (`robot_model/`,
+  `bridge/windows/`, `ros2_tools/validate/`), into `FusionAddins/Fusion2ROS`
+  — validating up front that the destination is writable and the source has
+  the add-in's `Fusion2ROS.py` entry point, so a doomed sync fails fast with
+  one actionable message instead of a raw traceback — and then, right after
+  a successful copy, automatically runs a fast subset of the same
+  environment checks described below (WSL/distro reachable, ROS setup
+  script present, `colcon` on `PATH`, workspace dir writable) and folds the
+  result into its own exit code (`0` only if the copy *and* that check both
+  succeeded). Pass `--full-env-check` to also include the slower real
+  `colcon build` probe in that same run, `--skip-env-check` to skip the
+  check entirely (e.g. for a fast inner loop), or `--watch` to keep
+  mirroring on every save (only the first sync in `--watch` mode runs the
+  environment check; re-run without `--watch` to check again later).
 
-Then in Fusion: **Tools → Add-Ins → Scripts and Add-Ins → Add-Ins tab →
-Fusion2ROS → Run**. Five new commands appear on the Solid tab's Create
-panel: **Generate ROS 2 Package**, **Validate ROS 2 Package**,
-**Build in WSL**, **Launch RViz**, **Check WSL Environment**.
+That command's own output ends by pointing at the one remaining step that
+genuinely can't be scripted from this side: in Fusion, **Tools → Add-Ins →
+Scripts and Add-Ins → Add-Ins tab → Fusion2ROS → Run**. Five new commands
+then appear on the Solid tab's Create panel: **Generate ROS 2 Package**,
+**Validate ROS 2 Package**, **Build in WSL**, **Launch RViz**,
+**Check WSL Environment**.
 
-### 2. Run the environment check
+### 2. Re-check the environment anytime
 
-Before generating anything, run **Check WSL Environment** — it verifies WSL
-and your distro are reachable, your ROS setup script exists, `colcon` is on
-`PATH`, and (the check that actually matters) `colcon` can build a real
-throwaway package end to end, not just that `catkin_pkg` imports. One clear
-pass/fail report up front beats a build failing halfway through later.
+`sync_addin`'s automatic check above already covers this at install time,
+so there's nothing extra to run before your first **Generate ROS 2
+Package**. To re-verify later — after a WSL/ROS update, on a new machine,
+or just to double check — either re-run `python3 -m bridge.windows.sync_addin`
+(or with `--full-env-check` for the complete check, including a real
+throwaway `colcon build`), or, from inside Fusion, run **Check WSL
+Environment** directly: it verifies WSL and your distro are reachable, your
+ROS setup script exists, `colcon` is on `PATH`, and (the check that
+actually matters) `colcon` can build a real throwaway package end to end,
+not just that `catkin_pkg` imports. One clear pass/fail report up front
+beats a build failing halfway through later.
 
 ### 3. Generate a package
 
@@ -136,9 +154,12 @@ a one-shot export:
   the candidates are ambiguous, rather than risk pairing wheels that don't
   belong together.
 - **Sensor UI** — three slots (type + parent link + optional name/update
-  rate) to attach cameras, lidar, or IMUs to links, feeding straight into
-  `generators/sensors.py`'s existing Gazebo XML and `ros_gz_bridge`
-  generation.
+  rate) to attach cameras, depth cameras, lidar, IMUs, or GPS/NavSat units
+  to links, feeding straight into `generators/sensors.py`'s existing Gazebo
+  XML and `ros_gz_bridge` generation. (Force/torque sensors are
+  generator-level only — they're joint-mounted, not link-mounted, so they
+  don't fit this slot shape; attach one by hand-editing the generated
+  `Robot`/URDF, see `generators/sensors.py`.)
 - **Smart checkbox defaults** — picking a drivetrain nudges "Gazebo" and
   "Nav2" on; a suitable single-chain arm nudges "MoveIt 2" on. Always
   one-directional — it never unchecks something you already chose.
@@ -171,6 +192,60 @@ python3 scripts/generate_from_json.py robot.json --output-dir output/ --ros2-con
 `examples/sample_arm.py` and `examples/sample_rover.py` are hand-authored
 `RobotModel`s used for exactly this — testing and demos with no Fusion
 process involved.
+
+### Previewing a package before generating it (`--dry-run`)
+
+`--dry-run` runs the exact same validation and path-computation as a real
+generation, but writes nothing to disk — instead it prints the list of
+files that *would* be written, each with a short description:
+
+```
+python3 scripts/generate_from_json.py robot.json --dry-run --ros2-control --moveit
+```
+
+```
+Dry run -- would generate ROS 2 package at: output/sample_arm
+  package.xml                    ROS 2 package manifest (name, dependencies, maintainer)
+  urdf/sample_arm.urdf.xacro     Robot description (URDF/Xacro)
+  launch/display.launch.py       RViz display launch file
+  rviz/sample_arm.rviz           RViz configuration
+  config/controllers.yaml        Generated output (text)
+  ...
+No files were written.
+```
+
+Any problem a real run would catch — a missing actuator limit, a robot
+unsuitable for MoveIt/Nav2, an escaping robot name or file path — is still
+caught and reported the same way; only the final disk write is skipped.
+
+### Config file (`.fusion2ros.yaml`)
+
+Repeated flags — which optional outputs to include, the default output
+directory, and default `package.xml` maintainer/license metadata — can be
+set once instead of retyped on every invocation. `generate_from_json.py`
+looks for `./.fusion2ros.yaml`, then `~/.fusion2ros.yaml`, unless `--config
+PATH` names one explicitly or `--no-config` disables config lookup
+entirely:
+
+```yaml
+output_dir: output/
+include:
+  ros2_control: true
+  gazebo: false
+  moveit: true
+  nav2: false
+moveit_group: arm
+maintainer:
+  name: Jane Doe
+  email: jane@example.com
+license: Apache-2.0
+```
+
+**Precedence: an explicit CLI flag always wins over the config file**, e.g.
+`--no-moveit` disables MoveIt even if the config file sets `moveit: true`.
+Maintainer/license values only fill in fields a robot's own JSON doesn't
+already set — see `fusion_addin/config.py`'s module docstring for the full
+format and precedence rule.
 
 ## Running the full demo (generate → colcon build, against a real ROS 2 workspace)
 
@@ -251,9 +326,18 @@ Fusion 360 process, are in `docs/ARCHITECTURE.md`'s "Status" sections.
   an external bug, not something fixable from this repo. The Fusion UI
   warns about it in the generation report when it applies, rather than
   letting you discover it via a crash.
-- **Nav2's `nav2_bringup` package itself was never exercised end-to-end**
-  on the machine this was built on (only individually-installed Nav2
-  servers were) — see `docs/ARCHITECTURE.md`'s Nav2 status note.
+- **Nav2's `nav2_bringup` package itself is still not exercised end-to-end** —
+  confirmed genuinely unavailable in this sandbox (not on the apt mirror at
+  all, and no root to install anything). As the closest substitute, all 7
+  individual Nav2 servers this project's `nav2_params.yaml` configures were
+  real-verified via `ros2 lifecycle set ... configure` against real,
+  installed Nav2 binaries: 6 of 7 (`map_server`, `amcl`, `planner_server`,
+  `behavior_server`, `bt_navigator`, `waypoint_follower`) configure cleanly,
+  4 of those 6 also `activate` cleanly. `controller_server`'s `configure`
+  reproducibly crashes on this machine's installed Nav2 1.5.1 build with a
+  root-caused, environment-level `nav2_costmap_2d` defect, confirmed
+  independent of any parameter value this repo generates — see
+  `docs/ARCHITECTURE.md`'s Nav2 status note for the full write-up.
 - **Install is a symlink or a copy-script**, not a packaged Fusion 360
   add-in you install from the Autodesk App Store — see
   [Getting started](#getting-started).

@@ -974,6 +974,17 @@ def generate_map_yaml_stub(robot: Robot) -> str:
     Nav2's launch/config wiring is complete and so the user has an obvious,
     documented placeholder to replace -- it must NOT be mistaken for a real
     map. See the comment embedded in the returned text.
+
+    CONFIRMED BY REAL TESTING (see docs/ARCHITECTURE.md's Nav2 status note):
+    `map_server`'s `configure` lifecycle transition FAILS against this stub
+    -- it is not a silent/benign placeholder. Running a real, installed
+    `nav2_map_server` against this exact generated file logs
+    `Failed to load image file ./map.pgm for reason: ... Unable to open
+    file`, then `Caught exception in callback for transition 10` /
+    `Lifecycle node map_server does not have error state implemented`, and
+    the node never reaches `inactive`. Replace `image:`/generate a real map
+    (see the STEP 1/2 instructions below) before relying on `map_server` or
+    `amcl` at all -- not just before trusting Nav2's navigation quality.
     """
     _require_suitable(robot)
 
@@ -982,8 +993,10 @@ def generate_map_yaml_stub(robot: Robot) -> str:
 #
 # THIS IS A PLACEHOLDER, NOT A REAL MAP. Fusion2ROS has no mapping/SLAM step
 # -- "map.pgm" referenced below does not exist and this file describes no
-# real environment. amcl/map_server will load it without erroring, but Nav2
-# WILL NOT NAVIGATE CORRECTLY against it.
+# real environment. map_server's `configure` lifecycle transition WILL FAIL
+# against this stub as-is (confirmed against a real installed map_server --
+# see fusion_addin/generators/nav2.py's generate_map_yaml_stub docstring) --
+# Nav2 will not even start cleanly until "image:" below points at a real map.
 #
 # Before using Nav2 for real:
 #   1. Drive this robot around its real (or simulated) environment with a

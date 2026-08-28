@@ -6,7 +6,12 @@ generated text parses as real YAML; the generator module itself never
 imports it (see fusion_addin/generators/nav2.py's module docstring).
 """
 
+import os
+import shutil
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -648,3 +653,291 @@ def test_map_yaml_stub_is_parseable():
     assert doc["origin"] == [0.0, 0.0, 0.0]
     assert 0.0 <= doc["free_thresh"] <= 1.0
     assert 0.0 <= doc["occupied_thresh"] <= 1.0
+
+
+# --- real Nav2 binary integration ---------------------------------------------
+#
+# Everything below actually runs real, installed Nav2 servers against this
+# generator's real, unmodified output, gated on those servers actually being
+# installed (skips cleanly if not -- CI is not expected to have Nav2
+# installed). See docs/ARCHITECTURE.md's Nav2 status note for the full
+# session log this codifies: `nav2_bringup` itself is NOT installable in that
+# sandbox (confirmed absent from the apt mirror entirely, and no root/sudo
+# available to try), so this is real verification of the individual servers
+# instead -- the most rigorous check achievable without `nav2_bringup`.
+#
+# controller_server is deliberately NOT exercised here: driving its
+# local_costmap through `configure` hits a reproducible, real "stack smashing
+# detected" crash in this machine's installed nav2_costmap_2d/nav2_controller
+# 1.5.1 build -- root-caused (in that same ARCHITECTURE.md note) to be
+# independent of any parameter VALUE this generator chooses (it reproduces
+# with a stripped-down params file using pure InflationLayer/ObstacleLayer
+# defaults, and does NOT reproduce for the byte-identical InflationLayer
+# config under planner_server's global_costmap), i.e. a genuine
+# environment/binary-level defect out of this repo's control -- not something
+# an automated test should assert on (a future/different Nav2 build fixing it
+# would make an "it must crash" assertion wrong, and deliberately triggering a
+# known native crash inside a pytest run is not good CI hygiene either).
+
+_REQUIRED_NAV2_SERVER_PACKAGES = (
+    "nav2_map_server",
+    "nav2_amcl",
+    "nav2_planner",
+    "nav2_behaviors",
+    "nav2_bt_navigator",
+    "nav2_waypoint_follower",
+)
+
+
+def _ros2_pkg_installed(pkg: str) -> bool:
+    if shutil.which("ros2") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["ros2", "pkg", "prefix", pkg], capture_output=True, timeout=30
+        )
+    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - environment dependent
+        return False
+    return result.returncode == 0
+
+
+_NAV2_SERVERS_INSTALLED = all(_ros2_pkg_installed(pkg) for pkg in _REQUIRED_NAV2_SERVER_PACKAGES)
+
+requires_real_nav2_servers = pytest.mark.skipif(
+    not _NAV2_SERVERS_INSTALLED,
+    reason="individual nav2 servers (nav2_map_server/nav2_amcl/nav2_planner/"
+    "nav2_behaviors/nav2_bt_navigator/nav2_waypoint_follower) are not all "
+    "installed on this machine",
+)
+
+
+def _write_synthetic_test_map(directory: Path) -> Path:
+    """A tiny, real, VALID map (NOT this generator's own placeholder stub,
+    which is documented to fail `configure` on purpose -- see
+    test_map_yaml_stub_configure_fails_against_real_map_server below) so
+    map_server/amcl have something real to load while this test checks
+    generator-produced *parameter* correctness, not mapping."""
+    width = height = 20
+    pgm = directory / "synthetic_test_map.pgm"
+    pgm.write_bytes(f"P5\n{width} {height}\n255\n".encode("ascii") + bytes([254]) * (width * height))
+    map_yaml = directory / "synthetic_test_map.yaml"
+    map_yaml.write_text(
+        "image: synthetic_test_map.pgm\n"
+        "resolution: 0.05\n"
+        "origin: [-0.5, -0.5, 0.0]\n"
+        "negate: 0\n"
+        "occupied_thresh: 0.65\n"
+        "free_thresh: 0.25\n"
+    )
+    return map_yaml
+
+
+def _wait_for_node(node_name: str, timeout: float = 25.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            result = subprocess.run(
+                ["ros2", "node", "list"], capture_output=True, text=True, timeout=10
+            )
+        except subprocess.TimeoutExpired:  # pragma: no cover - environment dependent
+            continue
+        if node_name in result.stdout.split():
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _launch_ros2_node(cmd: list) -> tuple:
+    """Popen wrapper for `ros2 run ...` that also captures the process's own
+    process-group id right away, while the process is guaranteed alive.
+
+    `ros2 run <pkg> <exe>` forks the real node as a genuine child process on
+    this system rather than exec-replacing itself, so killing only the
+    tracked wrapper PID leaves the actual node process orphaned and still
+    holding the stdout pipe's write end open -- confirmed directly by a
+    GitHub Actions "Terminate orphan process: ... (planner_server)" cleanup
+    line on a real CI run. `start_new_session=True` makes the wrapper (and
+    anything it forks, which inherits the same process group) killable as
+    one unit via `os.killpg`. The pgid is captured here, immediately after
+    spawn, rather than looked up lazily in `_terminate`: if the wrapper has
+    already exited by the time cleanup runs, `os.getpgid(proc.pid)` on the
+    now-dead PID raises `ProcessLookupError` and the still-live orphaned
+    child could never be reached.
+    """
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True
+    )
+    return proc, os.getpgid(proc.pid)
+
+
+def _terminate(proc: subprocess.Popen, pgid: int) -> None:
+    """Kill the process group `pgid` (see _launch_ros2_node), not just proc's
+    own PID -- see _launch_ros2_node's docstring for why that matters."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:  # pragma: no cover - environment dependent
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:  # pragma: no cover - process died concurrently
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover - environment dependent
+            pass
+
+
+def _drain_output(proc: subprocess.Popen) -> str:
+    """Best-effort capture of proc's remaining stdout, bounded by a timeout.
+
+    A raw proc.stdout.read() can hang forever if a descendant process
+    launched by `ros2 run` is still alive and holding the pipe's write end
+    open (see _launch_ros2_node's docstring). communicate(timeout=...) is
+    the safe alternative: it still reads whatever is buffered, but never
+    blocks past the timeout.
+    """
+    if proc.stdout is None:
+        return "<no output captured>"
+    try:
+        output, _ = proc.communicate(timeout=5)
+        return output or "<no output captured>"
+    except subprocess.TimeoutExpired:
+        return "<output capture timed out -- a descendant process may still hold the pipe open>"
+
+
+@requires_real_nav2_servers
+def test_real_nav2_servers_configure_cleanly_against_generated_params(tmp_path):
+    """The real integration check this module's docstring promises: generate
+    this robot's actual nav2_params.yaml (unmodified generator output),
+    launch each of the 6 non-crashing servers as real, separate
+    `nav2_<pkg>` processes against it, and drive each through the real
+    `configure` lifecycle transition via `ros2 lifecycle set`.
+
+    `configure` (not `activate`) is the right transition to check here: it
+    is exactly the step where each server parses this generator's YAML and
+    instantiates every plugin it names (costmap layers, planner/behavior/
+    navigator plugins, waypoint task executor) -- i.e. it is the step that
+    actually exercises whether the generated parameter file is structurally
+    correct and loadable by real Nav2 binaries. `activate` additionally
+    needs a live TF tree (from robot_state_publisher/amcl) and, for
+    bt_navigator's default BT, a running controller_server -- neither of
+    which this generator or this focused test provides, so requiring
+    `active` here would be testing this test's own harness, not the
+    generator's output.
+    """
+    robot = build_sample_rover()
+    params_text = generate_nav2_params_yaml(robot)
+    params_path = tmp_path / "nav2_params.yaml"
+    params_path.write_text(params_text)
+    map_yaml_path = _write_synthetic_test_map(tmp_path)
+
+    servers = [
+        ("nav2_map_server", "map_server", "map_server", [f"yaml_filename:={map_yaml_path}"]),
+        ("nav2_amcl", "amcl", "amcl", []),
+        ("nav2_planner", "planner_server", "planner_server", []),
+        ("nav2_behaviors", "behavior_server", "behavior_server", []),
+        ("nav2_bt_navigator", "bt_navigator", "bt_navigator", []),
+        ("nav2_waypoint_follower", "waypoint_follower", "waypoint_follower", []),
+    ]
+
+    procs = []
+    try:
+        for package, executable, node_name, overrides in servers:
+            cmd = [
+                "ros2",
+                "run",
+                package,
+                executable,
+                "--ros-args",
+                "--params-file",
+                str(params_path),
+                "-p",
+                "use_sim_time:=false",
+            ]
+            for override in overrides:
+                cmd += ["-p", override]
+            proc, pgid = _launch_ros2_node(cmd)
+            procs.append((node_name, proc, pgid))
+
+        for node_name, proc, pgid in procs:
+            assert _wait_for_node(f"/{node_name}", timeout=25.0), (
+                f"{node_name} never appeared on the ROS graph (process exited early?)"
+            )
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"{node_name} exited before it could be configured, output:\n{_drain_output(proc)}"
+                )
+
+        for node_name, proc, pgid in procs:
+            result = subprocess.run(
+                ["ros2", "lifecycle", "set", f"/{node_name}", "configure"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if "Transitioning successful" not in result.stdout:
+                _terminate(proc, pgid)
+                node_output = _drain_output(proc)
+                raise AssertionError(
+                    f"{node_name} failed to configure against the generated nav2_params.yaml.\n"
+                    f"lifecycle set stdout: {result.stdout}\nstderr: {result.stderr}\n"
+                    f"{node_name}'s own console output:\n{node_output}"
+                )
+            assert proc.poll() is None, f"{node_name} crashed during configure"
+    finally:
+        for _, proc, pgid in procs:
+            _terminate(proc, pgid)
+
+
+@requires_real_nav2_servers
+def test_map_yaml_stub_configure_fails_against_real_map_server(tmp_path):
+    """Regression check for the real bug this session found and fixed:
+    generate_map_yaml_stub's own embedded comment used to claim
+    "amcl/map_server will load it without erroring" -- FALSE, confirmed by
+    actually running a real installed map_server against this exact
+    generated file: `configure` throws ("Failed to load image file ...
+    Unable to open file") and the node never reaches `inactive`. This test
+    keeps that claim honest by checking it against a real binary, not just
+    the module's own docstring."""
+    robot = build_sample_rover()
+    map_yaml_text = generate_map_yaml_stub(robot)
+    map_yaml_path = tmp_path / "map.yaml"
+    map_yaml_path.write_text(map_yaml_text)
+    # generate_map_yaml_stub's "image: map.pgm" is deliberately never created.
+
+    # map_server takes yaml_filename as a *parameter*, not a params file.
+    proc, pgid = _launch_ros2_node(
+        [
+            "ros2",
+            "run",
+            "nav2_map_server",
+            "map_server",
+            "--ros-args",
+            "-p",
+            f"yaml_filename:={map_yaml_path}",
+            "-p",
+            "use_sim_time:=false",
+        ]
+    )
+    try:
+        assert _wait_for_node("/map_server", timeout=25.0), "map_server never appeared on the ROS graph"
+        result = subprocess.run(
+            ["ros2", "lifecycle", "set", "/map_server", "configure"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if "Transitioning failed" not in result.stdout + result.stderr:
+            _terminate(proc, pgid)
+            node_output = _drain_output(proc)
+            raise AssertionError(
+                "expected map_server's configure transition to FAIL against the "
+                f"placeholder stub (image file does not exist).\n"
+                f"lifecycle set stdout: {result.stdout}\nstderr: {result.stderr}\n"
+                f"map_server's own console output:\n{node_output}"
+            )
+    finally:
+        _terminate(proc, pgid)

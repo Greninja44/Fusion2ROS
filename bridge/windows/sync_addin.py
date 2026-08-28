@@ -27,15 +27,33 @@ sys.path -- see each sync_*_into() function below for which real bug it
 fixes (all three were found the same way: a ModuleNotFoundError live in
 Fusion, reproduced by simulating Fusion's sys.path against the deployed
 copy).
+
+`main()` also validates the destination up front (writable, and the
+source has the `<FolderName>.py` entry point Fusion actually requires) so a
+doomed sync fails fast with one actionable message instead of a raw
+traceback, and -- unless `--skip-env-check` is passed -- runs a fast subset
+of `bridge.windows.doctor`'s WSL/ROS 2 environment checks right after a
+successful sync and folds the result into this command's own exit code.
+That collapses "install the add-in" and "confirm the environment is
+healthy" (previously two separate steps: run this script, then remember to
+also run "Check WSL Environment" inside Fusion) into the one command a user
+actually runs from WSL; the only step that still can't be collapsed away is
+enabling the add-in inside Fusion's own UI (Tools -> Add-Ins -> ... -> Run),
+since nothing on this side of the boundary can drive that.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Optional
+
+from .doctor import all_critical_passed, format_report, run_environment_checks
+from .invoke import DEFAULT_DISTRO, DEFAULT_ROS_SETUP, DEFAULT_WSL_ROS_WS_SRC
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE = REPO_ROOT / "fusion_addin"
@@ -179,6 +197,54 @@ def _default_windows_addins_dir() -> Path:
     return candidates[0]
 
 
+def _verify_expected_addin_entry_point(source_dir: Path, dest_dir: Path) -> Optional[str]:
+    """Fusion only lists an add-in whose folder contains a `<FolderName>.py`
+    matching the folder's own name (see this module's top-of-file
+    docstring) -- e.g. `FusionAddins/Fusion2ROS/Fusion2ROS.py`. Returns an
+    actionable error string if `source_dir` doesn't have the file
+    `dest_dir`'s name requires, else None. This is normally only hit with a
+    customized `--dest` whose folder name doesn't match the add-in's own
+    entry-point file (the default `--dest` always ends in `Fusion2ROS`,
+    matching `fusion_addin/Fusion2ROS.py`, which is always present in a
+    checked-out repo) -- but when it does happen, the sync would otherwise
+    "succeed" while Fusion silently never shows the add-in at all, which is
+    a much worse failure mode than catching it here up front.
+    """
+    expected = f"{dest_dir.name}.py"
+    if not (source_dir / expected).is_file():
+        return (
+            f"Sync aborted: {source_dir} has no {expected!r}. Fusion 360 only loads an add-in "
+            f"whose folder name has a matching <FolderName>.py inside it, so {dest_dir.name!r} "
+            f"would never show up in Fusion's Add-Ins list after this sync. If --dest was "
+            f"customized, point it at a folder named after the add-in's own entry-point file "
+            f"(normally 'Fusion2ROS', matching fusion_addin/Fusion2ROS.py)."
+        )
+    return None
+
+
+def _check_dest_writable(dest_dir: Path) -> Optional[str]:
+    """Best-effort pre-check that `dest_dir` can actually be written to, so
+    a doomed sync fails fast with one clear, actionable message instead of
+    a raw PermissionError/OSError traceback partway through copying files.
+    Walks up to the nearest existing ancestor of dest_dir (which itself may
+    not exist yet) and checks that. Returns an error string if not
+    writable, else None.
+    """
+    probe = dest_dir
+    while not probe.exists():
+        parent = probe.parent
+        if parent == probe:
+            break
+        probe = parent
+    if not os.access(probe, os.W_OK):
+        return (
+            f"Sync aborted: destination is not writable: {dest_dir} (checked {probe}). Check "
+            f"folder permissions, and that it isn't locked by Explorer, Fusion, or a sync tool "
+            f"like OneDrive."
+        )
+    return None
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE, help="fusion_addin/ directory to sync from")
@@ -190,12 +256,49 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--watch", action="store_true", help="Re-sync every --interval seconds until Ctrl-C")
     parser.add_argument("--interval", type=float, default=2.0, help="Seconds between syncs in --watch mode")
+    parser.add_argument(
+        "--skip-env-check",
+        action="store_true",
+        help="Don't run the WSL/ROS 2 environment doctor checks after syncing (e.g. for fast --watch loops)",
+    )
+    parser.add_argument(
+        "--full-env-check",
+        action="store_true",
+        help="Include the slow real `colcon build` probe in the post-sync environment check "
+        "(default: a fast subset -- WSL/distro/ROS-setup/colcon-on-PATH/workspace only)",
+    )
+    parser.add_argument(
+        "--check-gazebo", action="store_true", help="Also check that `gz` (Gazebo Sim) is on PATH"
+    )
+    parser.add_argument("--distro", default=DEFAULT_DISTRO, help="WSL distro name for the environment check")
+    parser.add_argument("--ros-setup", default=DEFAULT_ROS_SETUP, help="ROS 2 setup script path inside the distro")
+    parser.add_argument(
+        "--ros-ws-src", default=DEFAULT_WSL_ROS_WS_SRC, help="Colcon workspace src/ dir inside the distro"
+    )
     args = parser.parse_args(argv)
 
-    dest = args.dest
-    if dest is None:
-        addins_dir = _default_windows_addins_dir()
-        dest = addins_dir / "Fusion2ROS"
+    try:
+        dest = args.dest
+        if dest is None:
+            addins_dir = _default_windows_addins_dir()
+            dest = addins_dir / "Fusion2ROS"
+    except FileNotFoundError as exc:
+        print(f"Could not determine the FusionAddins destination: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.source.is_dir():
+        print(f"Sync aborted: source directory does not exist: {args.source}", file=sys.stderr)
+        return 1
+
+    entry_point_error = _verify_expected_addin_entry_point(args.source, dest)
+    if entry_point_error:
+        print(entry_point_error, file=sys.stderr)
+        return 1
+
+    writable_error = _check_dest_writable(dest)
+    if writable_error:
+        print(writable_error, file=sys.stderr)
+        return 1
 
     def _sync_all() -> None:
         sync_addin_to_fusion(args.source, dest)
@@ -203,21 +306,68 @@ def main(argv=None) -> int:
         sync_robot_model_into(dest)
         sync_ros2_tools_validate_into(dest)
 
-    _sync_all()
+    try:
+        _sync_all()
+    except PermissionError as exc:
+        print(
+            f"Sync failed: destination is not writable ({exc}). Check that {dest} isn't open in "
+            f"Explorer/Fusion or locked by a sync tool like OneDrive, and that you have write "
+            f"permission there.",
+            file=sys.stderr,
+        )
+        return 1
+    except OSError as exc:
+        print(f"Sync failed: {exc}", file=sys.stderr)
+        return 1
+
     print(f"Synced {args.source} -> {dest}")
     print(f"Synced {BRIDGE_WINDOWS_SOURCE} -> {dest / 'bridge' / 'windows'}")
     print(f"Synced {ROBOT_MODEL_SOURCE} -> {dest / 'robot_model'}")
     print(f"Synced {ROS2_TOOLS_VALIDATE_SOURCE} -> {dest / 'ros2_tools' / 'validate'}")
+
+    env_ok = True
+    if not args.skip_env_check:
+        print()
+        print('Running WSL/ROS 2 environment checks (same as Fusion\'s "Check WSL Environment" command)...')
+        checks = run_environment_checks(
+            distro=args.distro,
+            ros_setup=args.ros_setup,
+            wsl_ros_ws_src=args.ros_ws_src,
+            check_gazebo=args.check_gazebo,
+            include_build_probe=args.full_env_check,
+        )
+        print(format_report(checks))
+        env_ok = all_critical_passed(checks)
+        print()
+        if env_ok:
+            subset_note = "" if args.full_env_check else " (fast subset -- pass --full-env-check for the real colcon build probe too)"
+            print(f"Install + environment check both OK{subset_note}.")
+        else:
+            print(
+                "Files are synced, but the environment check above found problems -- fix those "
+                "before building/launching from Fusion (Generate/Validate will still work).",
+                file=sys.stderr,
+            )
+
+    print()
+    print(
+        "Remaining manual step: in Fusion, go to Tools -> Add-Ins -> Scripts and Add-Ins -> "
+        "Add-Ins tab -> Fusion2ROS -> Run."
+    )
 
     if args.watch:
         print(f"Watching for changes every {args.interval}s (Ctrl-C to stop)...")
         try:
             while True:
                 time.sleep(args.interval)
-                _sync_all()
+                try:
+                    _sync_all()
+                except OSError as exc:
+                    print(f"Resync failed (will retry): {exc}", file=sys.stderr)
         except KeyboardInterrupt:
             print("Stopped.")
-    return 0
+
+    return 0 if env_ok else 1
 
 
 if __name__ == "__main__":

@@ -72,6 +72,40 @@ plain-"lidar" gz-sim sensor type worth emitting):
 `type == "imu"`:
     update_rate     float, Hz   default 100.0
 
+`type in ("depth_camera", "rgbd_camera")` (both map to gz-sim's real
+`rgbd_camera` SDF sensor type -- see the RGBD section below for why there is
+no separate plain-"depth_camera" gz-sim sensor type worth emitting, mirroring
+the existing "lidar"/"gpu_lidar" synonym convention above):
+    horizontal_fov  float, radians   default 1.047   (~60 deg)
+    width           int, pixels      default 320
+    height          int, pixels      default 240
+    format          str              default "R8G8B8"
+    near            float, meters    default 0.1
+    far             float, meters    default 100.0
+    update_rate     float, Hz        default 30.0
+
+`type in ("gps", "navsat")` (both map to gz-sim's real `navsat` SDF sensor
+type -- sdformat's own `sensor.sdf` documents "gps" as a deprecated-but-
+supported legacy alias for "navsat", see the NavSat section below):
+    update_rate     float, Hz   default 1.0
+
+`type == "force_torque"`:
+    joint               str, REQUIRED -- the name of the `robot_model.Joint`
+                        this sensor measures. Raises `ValueError` if absent
+                        (see the ForceTorque section below for why this
+                        sensor is joint-mounted, not link-mounted like every
+                        other type here, and why `parameters["joint"]`
+                        rather than `Sensor.parent_link` is what actually
+                        gets used for the emitted `<gazebo reference=...>`).
+    frame               str            optional; one of "parent"/"child"/
+                        "sensor" (gz-sim default: "child") -- omitted (SDF
+                        default applies) if not given
+    measure_direction   str            optional; one of
+                        "parent_to_child"/"child_to_parent" (gz-sim default:
+                        "child_to_parent") -- omitted (SDF default applies)
+                        if not given
+    update_rate         float, Hz      default 10.0
+
 Any other `Sensor.type` raises `ValueError` naming the sensor and its
 unrecognized type -- this module does not invent XML for a sensor kind it
 hasn't verified against a real gz-sim tag shape, same "don't invent, fail
@@ -80,19 +114,36 @@ limits.
 
 Known limitation, found via real end-to-end verification (see below): a
 world SDF needs the `gz-sim-sensors-system` (`gz::sim::systems::Sensors`)
-world plugin loaded for ANY sensor here to publish at all, and the "imu"
-type specifically ALSO needs a separate `gz-sim-imu-system`
-(`gz::sim::systems::Imu`) world plugin -- without it the camera/lidar
-topics come up fine but the IMU sensor never advertises its topic at all
-(confirmed by reproducing exactly that split live: `gz topic -l` showed
-`/front_camera/image` and `/main_lidar` but no `/body_imu` until the Imu
-system plugin was added to the test world, after which all three came up).
-`fusion_addin/generators/gazebo.py`'s `generate_world_sdf` -- out of this
-module's scope to touch or duplicate -- does not currently load either
-plugin (by its own docstring, it deliberately trimmed "extra sensor-support
-plugins" for its own minimal "does a robot come up" proof); a caller who
-wants `robot.sensors` to actually produce live gz topics needs to add both
-plugins to whatever world SDF the robot is spawned into.
+world plugin loaded for ANY sensor here to publish at all, and three types
+specifically ALSO need their own dedicated world plugin -- without it the
+camera/lidar topics come up fine but the type in question never advertises
+its topic at all (confirmed for "imu" by reproducing exactly that split
+live: `gz topic -l` showed `/front_camera/image` and `/main_lidar` but no
+`/body_imu` until the Imu system plugin was added to the test world, after
+which all three came up):
+  - "imu" needs `gz-sim-imu-system` (`gz::sim::systems::Imu`)
+  - "gps"/"navsat" needs `gz-sim-navsat-system` (`gz::sim::systems::NavSat`
+    -- confirmed loaded in this machine's installed
+    `.../gz-sim/worlds/spherical_coordinates.sdf`, the only real installed
+    world file with a live `type="navsat"` sensor)
+  - "force_torque" needs `gz-sim-forcetorque-system`
+    (`gz::sim::systems::ForceTorque` -- confirmed loaded in this machine's
+    installed `.../gz-sim/worlds/sensors.sdf`, which has a live
+    `type="force_torque"` sensor)
+"depth_camera"/"rgbd_camera" needs no extra plugin beyond
+`gz-sim-sensors-system` -- gz-sensors' `RgbdCameraSensor` is implemented on
+top of the same rendering path plain `CameraSensor` uses (confirmed: no
+`gz-sim-*-system` library dedicated to rgbd/depth cameras exists anywhere in
+this machine's installed gz-sim, unlike imu/navsat/forcetorque which each
+have their own).
+`fusion_addin/generators/gazebo.py`'s `generate_world_sdf` -- the one part
+of that module this module's scope also covers (see this module's own
+callers) -- loads `gz-sim-sensors-system` and `gz-sim-imu-system`
+unconditionally already; `gz-sim-navsat-system` and
+`gz-sim-forcetorque-system` were added there alongside this module's new
+"gps"/"navsat" and "force_torque" support, same unconditional convention (a
+world plugin with no matching sensor in a given robot is simply inert, not
+harmful).
 
 Real, live, end-to-end verification performed in this session (not just
 unit tests): a hand-built two-link, three-sensor `Robot` was run through
@@ -161,6 +212,41 @@ def _camera_info_topic(sensor: Sensor) -> str:
     return f"/{sensor.name}/camera_info"
 
 
+def _rgbd_image_topic(sensor: Sensor) -> str:
+    return f"{_default_topic(sensor)}/image"
+
+
+def _rgbd_camera_info_topic(sensor: Sensor) -> str:
+    """gz-sensors' `RgbdCameraSensor` reuses `CameraSensor` internally for
+    its RGB half (see `RgbdCameraSensor.hh`'s class docstring: "RGB image
+    (same as CameraSensor)"), so its camera_info topic follows the exact
+    same drop-last-path-component rule `_camera_info_topic` documents --
+    applied to `_rgbd_image_topic`'s "{name}/image" instead of the plain
+    camera's own image topic. Confirmed against the real, installed
+    `.../ros_gz_sim_demos/config/rgbd_camera_bridge.yaml`, which bridges
+    "/rgbd_camera/image" alongside "/rgbd_camera/camera_info" -- exactly
+    what dropping "image" off "/rgbd_camera/image" and appending
+    "/camera_info" produces.
+    """
+    return f"{_default_topic(sensor)}/camera_info"
+
+
+def _rgbd_depth_image_topic(sensor: Sensor) -> str:
+    """Confirmed against `.../ros_gz_sim_demos/config/rgbd_camera_bridge.yaml`
+    ("/rgbd_camera/depth_image") and `.../gz-sim/worlds/sensors_demo.sdf`'s
+    `ImageDisplay` GUI plugin (`<topic>rgbd_camera/depth_image</topic>`) --
+    a direct "{base topic}/depth_image" suffix, not derived the way
+    camera_info is."""
+    return f"{_default_topic(sensor)}/depth_image"
+
+
+def _rgbd_points_topic(sensor: Sensor) -> str:
+    """Confirmed against `.../ros_gz_sim_demos/config/rgbd_camera_bridge.yaml`
+    ("/rgbd_camera/points") -- a direct "{base topic}/points" suffix, same
+    convention as `_lidar_points_topic`."""
+    return f"{_default_topic(sensor)}/points"
+
+
 def _lidar_points_topic(sensor: Sensor) -> str:
     """gz-sensors' GpuLidarSensor always additionally publishes a
     PointCloudPacked cloud at `<main topic> + "/points"` (verified by
@@ -189,8 +275,11 @@ def generate_sensor_gazebo_xml(robot: Robot) -> str:
     perfectly ordinary robot.
 
     Raises `ValueError` (naming the offending sensor and its `type`) for any
-    `Sensor.type` other than "camera", "lidar", "gpu_lidar", or "imu" --
-    this module does not guess at gz-sim tag shapes it hasn't verified.
+    `Sensor.type` other than "camera", "lidar"/"gpu_lidar", "imu",
+    "depth_camera"/"rgbd_camera", "gps"/"navsat", or "force_torque" -- this
+    module does not guess at gz-sim tag shapes it hasn't verified. Also
+    raises `ValueError` for a "force_torque" sensor missing
+    `parameters["joint"]` (see `_gazebo_reference_for_sensor`'s docstring).
 
     Does not call `robot.validate()` -- consistent with `gazebo.py`'s
     `generate_gazebo_xml`, this only reads `robot.sensors`, so a robot
@@ -201,12 +290,53 @@ def generate_sensor_gazebo_xml(robot: Robot) -> str:
     fragment = ET.Element("gazebo_fragment")
 
     for sensor in robot.sensors:
-        gazebo_elem = ET.SubElement(fragment, "gazebo", {"reference": sensor.parent_link})
+        reference = _gazebo_reference_for_sensor(sensor)
+        gazebo_elem = ET.SubElement(fragment, "gazebo", {"reference": reference})
         gazebo_elem.append(_build_sensor_element(sensor))
 
     ET.indent(fragment, space="  ")
     body = ET.tostring(fragment, encoding="unicode")
     return f"{body}\n"
+
+
+def _gazebo_reference_for_sensor(sensor: Sensor) -> str:
+    """The `reference` attribute of the `<gazebo reference=...>` block a
+    sensor's `<sensor>` element is wrapped in.
+
+    Every sensor type here except "force_torque" is link-mounted, so this is
+    simply `sensor.parent_link` -- unchanged from before "force_torque"
+    existed.
+
+    "force_torque" is different: gz-sim's `force_torque` SDF sensor is
+    nested inside a `<joint>`, not a `<link>` (confirmed against this
+    machine's installed `.../gz-sim/worlds/sensors.sdf`, whose
+    `force_torque_demo` model nests its `<sensor type="force_torque">`
+    directly inside `<joint name="joint_01">`, and independently confirmed
+    live in this session: a hand-built URDF with
+    `<gazebo reference="a_joint_name"><sensor type="force_torque">...`,
+    run through `gz sdf --print`, placed the `<sensor>` inside the
+    resulting `<joint name="a_joint_name">` element exactly as expected --
+    sdformat's URDF importer resolves a `<gazebo reference=...>` name
+    against joint names, not just link names). `robot_model.Sensor` has no
+    joint-reference field (`parent_link` is, by schema, a link name --
+    required so `Robot.validate()` can check it against a real link), so a
+    "force_torque" sensor instead names its joint via
+    `parameters["joint"]`; that is what this function returns for it,
+    NOT `sensor.parent_link`. Raises `ValueError` naming the sensor if
+    `parameters["joint"]` is missing -- this module does not guess a joint
+    name.
+    """
+    if sensor.type == "force_torque":
+        joint = sensor.parameters.get("joint")
+        if not joint:
+            raise ValueError(
+                f"Sensor {sensor.name!r} has type 'force_torque', which requires "
+                "parameters['joint'] naming the Joint it measures (gz-sim's "
+                "force_torque sensor is nested inside a <joint>, not a <link> -- "
+                "see _gazebo_reference_for_sensor's docstring)."
+            )
+        return str(joint)
+    return sensor.parent_link
 
 
 def _build_sensor_element(sensor: Sensor) -> ET.Element:
@@ -216,10 +346,17 @@ def _build_sensor_element(sensor: Sensor) -> ET.Element:
         return _build_lidar_sensor(sensor)
     if sensor.type == "imu":
         return _build_imu_sensor(sensor)
+    if sensor.type in ("depth_camera", "rgbd_camera"):
+        return _build_rgbd_camera_sensor(sensor)
+    if sensor.type in ("gps", "navsat"):
+        return _build_navsat_sensor(sensor)
+    if sensor.type == "force_torque":
+        return _build_force_torque_sensor(sensor)
     raise ValueError(
         f"Sensor {sensor.name!r} has unrecognized type {sensor.type!r} -- "
         "generate_sensor_gazebo_xml only knows how to emit gz-sim XML for "
-        "'camera', 'lidar'/'gpu_lidar', and 'imu' (see sensors.py's module "
+        "'camera', 'lidar'/'gpu_lidar', 'imu', 'depth_camera'/'rgbd_camera', "
+        "'gps'/'navsat', and 'force_torque' (see sensors.py's module "
         "docstring for the documented parameters dict shape each expects)."
     )
 
@@ -318,6 +455,94 @@ def _build_imu_sensor(sensor: Sensor) -> ET.Element:
     return _common_sensor_attrs_and_children(sensor, "imu", _default_topic(sensor), default_update_rate=100.0)
 
 
+def _build_rgbd_camera_sensor(sensor: Sensor) -> ET.Element:
+    """<sensor type="rgbd_camera"> shape confirmed against
+    `.../gz-sim/worlds/sensors_demo.sdf`'s "rgbd_camera" model (read live in
+    this session): a `<camera>` child with exactly the same
+    `<horizontal_fov>`/`<image><width>/<height>/<format>`/`<clip><near>/
+    <far>` shape `_build_camera_sensor` already uses -- `rgbd_camera` is one
+    of the sensor types that includes sdformat's shared `camera.sdf` element
+    (confirmed in `sensor.sdf`'s own `<include filename="camera.sdf">`,
+    which is not scoped to `type="camera"` sensors only), so this
+    deliberately reuses the same `<camera>` child shape rather than
+    inventing a separate one. `<topic>` is the sensor's own bare
+    "/{name}" (matching the demo's bare `<topic>rgbd_camera</topic>`) --
+    UNLIKE plain "camera", which needs the "/{name}/image" trick (see this
+    module's top-of-file topic-convention comment); `RgbdCameraSensor`
+    advertises image/camera_info/depth_image/points all as direct suffixes
+    of this bare base topic (see `_rgbd_image_topic` etc.'s docstrings for
+    the citations), so no such trick is needed here.
+    """
+    p = sensor.parameters
+    elem = _common_sensor_attrs_and_children(
+        sensor, "rgbd_camera", _default_topic(sensor), default_update_rate=30.0
+    )
+
+    camera = ET.SubElement(elem, "camera")
+    ET.SubElement(camera, "horizontal_fov").text = _fmt_float(p.get("horizontal_fov", 1.047))
+    image = ET.SubElement(camera, "image")
+    ET.SubElement(image, "width").text = str(int(p.get("width", 320)))
+    ET.SubElement(image, "height").text = str(int(p.get("height", 240)))
+    ET.SubElement(image, "format").text = str(p.get("format", "R8G8B8"))
+    clip = ET.SubElement(camera, "clip")
+    ET.SubElement(clip, "near").text = _fmt_float(p.get("near", 0.1))
+    ET.SubElement(clip, "far").text = _fmt_float(p.get("far", 100.0))
+
+    return elem
+
+
+def _build_navsat_sensor(sensor: Sensor) -> ET.Element:
+    """<sensor type="navsat"> shape confirmed against
+    `.../gz-sim/worlds/spherical_coordinates.sdf`'s "navsat" sensor (read
+    live in this session): just `<always_on>`, `<update_rate>`, `<topic>`
+    at the `<sensor>` level -- gz-sim's NavSat sensor needs no required
+    type-specific child element (the optional `<navsat>` element, per
+    sdformat's `navsat.sdf`, exists only for
+    position_sensing/velocity_sensing noise-model tuning, which
+    RobotModel's `Sensor.parameters` doesn't carry a documented shape for
+    here, so it is correctly omitted rather than guessed at -- same
+    reasoning `_build_imu_sensor` already uses for IMU's own optional
+    `<imu>` noise element). Both "gps" and "navsat" robot_model spellings
+    map to this real `navsat` SDF type -- sdformat's `sensor.sdf` documents
+    "gps" as a deprecated-but-still-supported legacy alias for "navsat",
+    same "prefer the modern name, accept the legacy synonym" convention
+    `_build_lidar_sensor` already uses for "lidar"/"gpu_lidar".
+    """
+    return _common_sensor_attrs_and_children(sensor, "navsat", _default_topic(sensor), default_update_rate=1.0)
+
+
+def _build_force_torque_sensor(sensor: Sensor) -> ET.Element:
+    """<sensor type="force_torque"> shape confirmed against
+    `.../gz-sim/worlds/sensors.sdf`'s "force_torque_demo" model (read live
+    in this session, and independently confirmed via a real `gz sdf
+    --print` run in this session -- see `_gazebo_reference_for_sensor`'s
+    docstring): `<always_on>`, `<update_rate>`, `<topic>` at the `<sensor>`
+    level, same as every other type here. The optional `<force_torque>`
+    child (sdformat's `forcetorque.sdf`: `<frame>`/`<measure_direction>`,
+    both optional with their own SDF-level defaults of "child" and
+    "child_to_parent" respectively) is emitted only when
+    `parameters["frame"]` and/or `parameters["measure_direction"]` are
+    given -- omitted entirely otherwise, same "don't guess, let the SDF
+    default apply" convention `_build_imu_sensor`/`_build_navsat_sensor`
+    already use for their own optional noise-model children.
+    """
+    p = sensor.parameters
+    elem = _common_sensor_attrs_and_children(
+        sensor, "force_torque", _default_topic(sensor), default_update_rate=10.0
+    )
+
+    frame = p.get("frame")
+    measure_direction = p.get("measure_direction")
+    if frame is not None or measure_direction is not None:
+        ft = ET.SubElement(elem, "force_torque")
+        if frame is not None:
+            ET.SubElement(ft, "frame").text = str(frame)
+        if measure_direction is not None:
+            ET.SubElement(ft, "measure_direction").text = str(measure_direction)
+
+    return elem
+
+
 # --- generate_ros_gz_bridge_yaml ------------------------------------------
 
 
@@ -360,9 +585,39 @@ def generate_ros_gz_bridge_yaml(robot: Robot) -> str:
       2D-vs-3D choice, both are bridged unconditionally).
     - "imu": ONE entry -- `sensor_msgs/msg/Imu` <-> `gz.msgs.IMU` on
       `/{name}`.
+    - "depth_camera"/"rgbd_camera": FOUR entries -- `sensor_msgs/msg/Image`
+      <-> `gz.msgs.Image` on both `/{name}/image` (color) and
+      `/{name}/depth_image` (depth -- also an `Image`, per this machine's
+      installed `rgbd_camera_bridge.yaml`, NOT a specialized depth message
+      type), `sensor_msgs/msg/CameraInfo` <-> `gz.msgs.CameraInfo` on
+      `/{name}/camera_info`, and `sensor_msgs/msg/PointCloud2` <->
+      `gz.msgs.PointCloudPacked` on `/{name}/points` (all four topic names
+      and message-type pairings copied verbatim from this machine's
+      installed `.../ros_gz_sim_demos/config/rgbd_camera_bridge.yaml`).
+    - "gps"/"navsat": ONE entry -- `sensor_msgs/msg/NavSatFix` <->
+      `gz.msgs.NavSat` on `/{name}` (copied from this machine's installed
+      `.../ros_gz_sim_demos/config/navsat.yaml`; that same directory's
+      `navsat_gpsfix.yaml` shows `gps_msgs/msg/GPSFix` as an alternative ROS
+      type for the identical `gz.msgs.NavSat` gz topic, but `NavSatFix` is
+      the one this module emits -- it's the standard `sensor_msgs` type
+      `robot_localization`'s `navsat_transform_node` and Nav2's GPS
+      waypoint-following both consume directly, whereas `GPSFix` needs an
+      extra driver package).
+    - "force_torque": ONE entry -- `geometry_msgs/msg/WrenchStamped` <->
+      `gz.msgs.Wrench` on `/{name}` (this exact ROS/gz type pairing is
+      confirmed as a real, implemented `ros_gz_bridge` conversion in this
+      machine's installed
+      `/opt/ros/lyrical/include/ros_gz_bridge/ros_gz_bridge/convert/geometry_msgs.hpp`,
+      which declares `convert_gz_to_ros`/`convert_ros_to_gz` overloads for
+      exactly `geometry_msgs::msg::WrenchStamped` <-> `gz::msgs::Wrench`;
+      gz-sensors' `ForceTorqueSensor` publishes a bare `gz.msgs.Wrench` on
+      its own `<topic>`, same as every other sensor type here).
 
     Raises the same `ValueError` as `generate_sensor_gazebo_xml` for any
-    unrecognized `Sensor.type`.
+    unrecognized `Sensor.type`. Unlike `generate_sensor_gazebo_xml`, this
+    function does NOT require `parameters["joint"]` on a "force_torque"
+    sensor -- the bridge config only needs the sensor's own topic/message
+    types, not where in the SDF tree its `<sensor>` element ends up.
 
     Returns an empty-but-valid `[]\\n` (a valid, empty YAML list) when
     `robot.sensors` is empty.
@@ -415,10 +670,24 @@ def _bridge_entries_for_sensor(sensor: Sensor) -> List[Tuple[str, str, str, str,
     if sensor.type == "imu":
         topic = _default_topic(sensor)
         return [_bridge_entry(topic, "sensor_msgs/msg/Imu", "gz.msgs.IMU")]
+    if sensor.type in ("depth_camera", "rgbd_camera"):
+        return [
+            _bridge_entry(_rgbd_image_topic(sensor), "sensor_msgs/msg/Image", "gz.msgs.Image"),
+            _bridge_entry(_rgbd_camera_info_topic(sensor), "sensor_msgs/msg/CameraInfo", "gz.msgs.CameraInfo"),
+            _bridge_entry(_rgbd_depth_image_topic(sensor), "sensor_msgs/msg/Image", "gz.msgs.Image"),
+            _bridge_entry(_rgbd_points_topic(sensor), "sensor_msgs/msg/PointCloud2", "gz.msgs.PointCloudPacked"),
+        ]
+    if sensor.type in ("gps", "navsat"):
+        topic = _default_topic(sensor)
+        return [_bridge_entry(topic, "sensor_msgs/msg/NavSatFix", "gz.msgs.NavSat")]
+    if sensor.type == "force_torque":
+        topic = _default_topic(sensor)
+        return [_bridge_entry(topic, "geometry_msgs/msg/WrenchStamped", "gz.msgs.Wrench")]
     raise ValueError(
         f"Sensor {sensor.name!r} has unrecognized type {sensor.type!r} -- "
         "generate_ros_gz_bridge_yaml only knows how to bridge 'camera', "
-        "'lidar'/'gpu_lidar', and 'imu'."
+        "'lidar'/'gpu_lidar', 'imu', 'depth_camera'/'rgbd_camera', "
+        "'gps'/'navsat', and 'force_torque'."
     )
 
 

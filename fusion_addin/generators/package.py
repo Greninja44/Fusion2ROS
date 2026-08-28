@@ -19,14 +19,52 @@ importable and testable under plain WSL/CI ``python3`` just like
 from __future__ import annotations
 
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 from xml.sax.saxutils import escape, quoteattr
 
 from robot_model import Robot
 
 MeshSource = Union[bytes, Path]
 FileContent = Union[str, bytes]
+
+
+@dataclass(frozen=True)
+class ManifestEntry:
+    """One file `generate_package(..., dry_run=True)` would write.
+
+    `path` is package-relative (forward slashes, e.g. "urdf/rover.urdf.xacro"
+    -- never an absolute filesystem path, so a manifest is stable/comparable
+    across machines and output directories)."""
+
+    path: str
+    description: str
+
+
+@dataclass(frozen=True)
+class PackageManifest:
+    """What `generate_package(..., dry_run=True)` returns instead of writing
+    anything: the package directory a real run would create (which may not
+    exist yet -- dry-run never creates it), the files that run would write
+    (see ManifestEntry), and the top-level directories CMakeLists.txt would
+    install (install_dirs -- see generate_package's own docstring for why
+    that list is derived rather than fixed).
+
+    Deliberately a different return type than a real run's `Path` (rather
+    than, say, returning a Path that happens to not exist) -- code that
+    forgets to branch on `dry_run` and tries to treat the result as a path
+    fails immediately and obviously instead of silently operating on a
+    directory that was never created.
+    """
+
+    pkg_dir: Path
+    entries: Tuple[ManifestEntry, ...]
+    install_dirs: Tuple[str, ...]
+
+    @property
+    def paths(self) -> Tuple[str, ...]:
+        return tuple(entry.path for entry in self.entries)
 
 
 def _ensure_within(base_dir: Path, candidate: Path, label: str) -> None:
@@ -59,7 +97,8 @@ def generate_package(
     output_dir: Path,
     extra_files: Optional[Dict[str, FileContent]] = None,
     extra_depends: Optional[List[str]] = None,
-) -> Path:
+    dry_run: bool = False,
+) -> Union[Path, PackageManifest]:
     """Write a complete ROS 2 package tree for ``robot`` under ``output_dir``.
 
     Returns the path to the generated package directory
@@ -88,10 +127,30 @@ def generate_package(
     itself doesn't enforce this for a plain ``ament_cmake`` package with no
     compiled code. Duplicates against the base set are dropped, preserving
     ``extra_depends``' order for anything new.
+
+    ``dry_run`` (default False): when True, no directory is created and no
+    file is written -- ``output_dir``/``pkg_dir`` are never touched at all,
+    not even ``mkdir``'d. Every other computation that a real run performs
+    before it starts writing still happens: the same ``Robot.name`` ->
+    ``pkg_dir`` path-escape guard, and the same mesh_files/extra_files
+    key-escape and value-type checks that ``_write_meshes``/
+    ``_write_extra_files`` perform (via the exact same ``_ensure_within``
+    calls and dest-path helpers a real run uses -- not a separate,
+    reimplemented check that could silently drift out of sync with them).
+    Returns a `PackageManifest` describing what a real run (same arguments,
+    ``dry_run=False``) would write, instead of the `Path` a real run
+    returns -- see `PackageManifest`'s docstring for why that's a distinct
+    type rather than a `Path` that happens not to exist yet.
     """
     output_dir = Path(output_dir)
     pkg_dir = output_dir / robot.name
     _ensure_within(output_dir, pkg_dir, f"Robot.name {robot.name!r}")
+
+    mesh_files = mesh_files or {}
+    extra_files = extra_files or {}
+
+    if dry_run:
+        return _plan_package(robot, pkg_dir, mesh_files, extra_files)
 
     if pkg_dir.exists():
         shutil.rmtree(pkg_dir)
@@ -109,7 +168,7 @@ def generate_package(
     _write_meshes(mesh_files, meshes_dir)
     _write_launch(robot, launch_dir)
     _write_rviz(robot, rviz_dir)
-    _write_extra_files(extra_files or {}, pkg_dir)
+    _write_extra_files(extra_files, pkg_dir)
 
     # Written last: extra_files can introduce entirely new top-level dirs
     # (e.g. gazebo.py's "worlds/") beyond the fixed urdf/meshes/launch/rviz/
@@ -125,10 +184,74 @@ def generate_package(
     return pkg_dir
 
 
+# Fixed top-level directories every real run creates (and therefore installs
+# via CMakeLists) regardless of content -- see generate_package's `for d in
+# (...)` mkdir loop. Shared with _plan_package so a dry run's install_dirs
+# matches a real run's without hardcoding this list a second time.
+_FIXED_INSTALL_DIRS = ("config", "launch", "meshes", "rviz", "urdf")
+
+
+def _plan_package(
+    robot: Robot,
+    pkg_dir: Path,
+    mesh_files: Dict[str, MeshSource],
+    extra_files: Dict[str, FileContent],
+) -> PackageManifest:
+    """dry_run=True's implementation: validates exactly what a real run
+    would validate (via the same _mesh_file_dest/_extra_file_dest helpers
+    _write_meshes/_write_extra_files themselves call), then describes what
+    would be written without writing it. Never creates or modifies
+    anything on disk."""
+    entries: List[ManifestEntry] = [
+        ManifestEntry("package.xml", "ROS 2 package manifest (name, dependencies, maintainer)"),
+        ManifestEntry(f"urdf/{robot.name}.urdf.xacro", "Robot description (URDF/Xacro)"),
+    ]
+
+    meshes_dir = pkg_dir / "meshes"
+    for rel_name, source in mesh_files.items():
+        _mesh_file_dest(meshes_dir, rel_name)  # validates escape; result unused, dry run copies nothing
+        if not isinstance(source, (Path, bytes, bytearray)):
+            raise TypeError(
+                f"mesh_files[{rel_name!r}] must be bytes or a pathlib.Path, got {type(source).__name__}"
+            )
+        entries.append(ManifestEntry(f"meshes/{rel_name}", "Mesh file"))
+
+    entries.append(ManifestEntry("launch/display.launch.py", "RViz display launch file"))
+    entries.append(ManifestEntry(f"rviz/{robot.name}.rviz", "RViz configuration"))
+
+    extra_top_dirs = set()
+    for rel_path, content in extra_files.items():
+        _extra_file_dest(pkg_dir, rel_path)  # validates escape; result unused, dry run writes nothing
+        if not isinstance(content, (str, bytes, bytearray)):
+            raise TypeError(f"extra_files[{rel_path!r}] must be str or bytes, got {type(content).__name__}")
+        parts = Path(rel_path).parts
+        if len(parts) > 1:
+            extra_top_dirs.add(parts[0])
+        kind = "text" if isinstance(content, str) else "binary"
+        entries.append(ManifestEntry(rel_path.replace("\\", "/"), f"Generated output ({kind})"))
+
+    install_dirs = tuple(sorted(set(_FIXED_INSTALL_DIRS) | extra_top_dirs))
+    entries.append(
+        ManifestEntry("CMakeLists.txt", f"Build/install rules (installs: {', '.join(install_dirs)})")
+    )
+
+    return PackageManifest(pkg_dir=pkg_dir, entries=tuple(entries), install_dirs=install_dirs)
+
+
+def _extra_file_dest(pkg_dir: Path, rel_path: str) -> Path:
+    """Computes (and, via `_ensure_within`, validates) where `extra_files[rel_path]`
+    lands -- factored out of `_write_extra_files` so `_plan_package`'s dry-run
+    path performs the exact same escape check against the exact same
+    destination a real write would use, rather than a separate check that
+    could drift out of sync with it."""
+    dest = pkg_dir / rel_path
+    _ensure_within(pkg_dir, dest, f"extra_files key {rel_path!r}")
+    return dest
+
+
 def _write_extra_files(extra_files: Dict[str, FileContent], pkg_dir: Path) -> None:
     for rel_path, content in extra_files.items():
-        dest = pkg_dir / rel_path
-        _ensure_within(pkg_dir, dest, f"extra_files key {rel_path!r}")
+        dest = _extra_file_dest(pkg_dir, rel_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(content, str):
             dest.write_text(content, encoding="utf-8")
@@ -211,10 +334,18 @@ def _write_urdf_xacro(robot: Robot, urdf_dir: Path, urdf_xacro: str) -> None:
     (urdf_dir / f"{robot.name}.urdf.xacro").write_text(urdf_xacro, encoding="utf-8")
 
 
+def _mesh_file_dest(meshes_dir: Path, rel_name: str) -> Path:
+    """Computes (and, via `_ensure_within`, validates) where `mesh_files[rel_name]`
+    lands -- see `_extra_file_dest`'s docstring for why this is factored out
+    the same way."""
+    dest = meshes_dir / rel_name
+    _ensure_within(meshes_dir, dest, f"mesh_files key {rel_name!r}")
+    return dest
+
+
 def _write_meshes(mesh_files: Dict[str, MeshSource], meshes_dir: Path) -> None:
     for rel_name, source in mesh_files.items():
-        dest = meshes_dir / rel_name
-        _ensure_within(meshes_dir, dest, f"mesh_files key {rel_name!r}")
+        dest = _mesh_file_dest(meshes_dir, rel_name)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(source, Path):
             shutil.copyfile(source, dest)

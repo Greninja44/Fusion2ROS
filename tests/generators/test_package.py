@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from robot_model import Inertial, Joint, JointType, Link, Robot
-from fusion_addin.generators.package import generate_package
+from fusion_addin.generators.package import PackageManifest, generate_package
 
 ROS_SETUP = Path("/opt/ros/lyrical/setup.bash")
 
@@ -329,6 +329,97 @@ def test_generate_package_rejects_extra_files_key_that_escapes_pkg_dir(tmp_path)
         generate_package(
             robot, TRIVIAL_URDF_XACRO, {}, tmp_path, extra_files={"../escaped.yaml": "data: 1\n"}
         )
+
+
+# --- dry_run -------------------------------------------------------------
+
+
+def test_dry_run_writes_nothing(tmp_path):
+    robot = make_demo_robot()
+    mesh_files = {"base_link.stl": FAKE_MESH_BYTES}
+
+    result = generate_package(
+        robot,
+        TRIVIAL_URDF_XACRO,
+        mesh_files,
+        tmp_path,
+        extra_files={"config/controllers.yaml": "controller_manager: {}\n"},
+        dry_run=True,
+    )
+
+    assert isinstance(result, PackageManifest)
+    # Not even the package directory itself is created -- a real run's
+    # first move is `pkg_dir.mkdir(...)` (after any pre-existing dir is
+    # rmtree'd); dry_run must short-circuit before any of that.
+    assert not tmp_path.exists() or not any(tmp_path.iterdir())
+
+
+def test_dry_run_manifest_lists_every_file_a_real_run_would_write(tmp_path):
+    robot = make_demo_robot()
+    mesh_files = {"base_link.stl": FAKE_MESH_BYTES}
+    extra_files = {
+        "config/controllers.yaml": "controller_manager: {}\n",
+        "worlds/empty.sdf": "<sdf version='1.8'></sdf>\n",
+    }
+
+    manifest = generate_package(
+        robot, TRIVIAL_URDF_XACRO, mesh_files, tmp_path, extra_files=extra_files, dry_run=True
+    )
+    real_pkg_dir = generate_package(
+        robot, TRIVIAL_URDF_XACRO, mesh_files, tmp_path, extra_files=extra_files
+    )
+
+    real_files = {str(p.relative_to(real_pkg_dir)) for p in real_pkg_dir.rglob("*") if p.is_file()}
+    assert set(manifest.paths) == real_files
+    assert manifest.pkg_dir == real_pkg_dir
+    # worlds/ is a new top-level dir introduced by extra_files -- must show
+    # up in install_dirs same as a real run's CMakeLists.txt would.
+    assert "worlds" in manifest.install_dirs
+    real_cmake_dirs = (real_pkg_dir / "CMakeLists.txt").read_text()
+    assert "worlds" in real_cmake_dirs
+
+
+def test_dry_run_still_rejects_robot_name_that_escapes_output_dir(tmp_path):
+    robot = make_demo_robot(name="../escaped_pkg")
+    with pytest.raises(ValueError, match="Robot.name"):
+        generate_package(robot, TRIVIAL_URDF_XACRO, {}, tmp_path, dry_run=True)
+
+
+def test_dry_run_still_rejects_mesh_files_key_that_escapes_meshes_dir(tmp_path):
+    robot = make_demo_robot()
+    with pytest.raises(ValueError, match="mesh_files"):
+        generate_package(
+            robot, TRIVIAL_URDF_XACRO, {"../escaped.stl": FAKE_MESH_BYTES}, tmp_path, dry_run=True
+        )
+
+
+def test_dry_run_still_rejects_extra_files_key_that_escapes_pkg_dir(tmp_path):
+    robot = make_demo_robot()
+    with pytest.raises(ValueError, match="extra_files"):
+        generate_package(
+            robot, TRIVIAL_URDF_XACRO, {}, tmp_path, extra_files={"../escaped.yaml": "data: 1\n"}, dry_run=True
+        )
+
+
+def test_dry_run_still_rejects_bad_mesh_file_type(tmp_path):
+    robot = make_demo_robot()
+    with pytest.raises(TypeError):
+        generate_package(robot, TRIVIAL_URDF_XACRO, {"bad.stl": "not bytes or Path"}, tmp_path, dry_run=True)
+
+
+def test_dry_run_does_not_disturb_an_existing_package_directory(tmp_path):
+    # A real run is idempotent via `shutil.rmtree` + rebuild; dry_run must
+    # NOT do that -- an existing generated package (or, worse, anything
+    # else already at that path) must be left completely untouched.
+    robot = make_demo_robot()
+    generate_package(robot, TRIVIAL_URDF_XACRO, {"base_link.stl": FAKE_MESH_BYTES}, tmp_path)
+    pkg_dir = tmp_path / robot.name
+    before = {p: p.read_bytes() for p in pkg_dir.rglob("*") if p.is_file()}
+
+    generate_package(robot, TRIVIAL_URDF_XACRO, {"different.stl": FAKE_MESH_BYTES}, tmp_path, dry_run=True)
+
+    after = {p: p.read_bytes() for p in pkg_dir.rglob("*") if p.is_file()}
+    assert before == after
 
 
 @pytest.mark.skipif(
