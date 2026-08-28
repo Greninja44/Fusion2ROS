@@ -33,12 +33,11 @@ Fusion2ROS/
 │   └── Fusion2ROS.py      # add-in entry point (Fusion looks for <FolderName>/<FolderName>.py)
 │
 ├── ros2_tools/           # WSL SIDE — pure Linux/ROS 2. Never imported by fusion_addin.
-│   ├── validate/          # URDF/package/tree validation (works even without a live ROS env)
-│   └── build/             # colcon build wrappers, launch helpers
+│   └── validate/          # URDF/package/tree validation (works even without a live ROS env)
 │
 ├── bridge/               # Talks across the Windows/WSL boundary.
 │   ├── windows/            # runs on Windows side: invokes wsl.exe, detects WSL, copies output/
-│   └── wsl_side/            # optional WSL-side helper invoked by the Windows bridge
+│   └── wsl_side/            # colcon build wrappers invoked by the Windows bridge (build.py)
 │
 ├── output/                # Generated ROS 2 packages land here before being copied into
 │                            # a real colcon workspace (e.g. ~/ros2_ws/src/<robot>/)

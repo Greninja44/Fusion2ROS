@@ -71,6 +71,18 @@ def export_link_meshes(design, robot: Robot, output_dir: Path) -> Dict[str, Path
             continue  # nothing to export (e.g. a pure-reference/empty occurrence)
 
         dest = output_dir / f"{link.name}.stl"
+        # Link.name has no character restrictions in robot_model.schema (the
+        # normal Fusion pipeline sanitizes it upstream in
+        # fusion_addin.extraction.converter.sanitize_link_name, but this
+        # function accepts any Robot, e.g. one hand-built or loaded from
+        # JSON). Since Path("/out") / "/etc/passwd" == Path("/etc/passwd"),
+        # an absolute-looking or ".."-containing link name would otherwise
+        # make the Fusion STL exporter write outside output_dir entirely.
+        if dest.resolve().parent != output_dir.resolve():
+            raise ValueError(
+                f"Link.name {link.name!r} would export outside {output_dir} "
+                f"(resolves to {dest.resolve()})"
+            )
         stl_options = export_mgr.createSTLExportOptions(occ, str(dest))
         export_mgr.execute(stl_options)
         exported[link.name] = dest

@@ -442,6 +442,19 @@ def _apply_persisted_dialog_state(inputs: "adsk.core.CommandInputs", saved: Dict
             _select_dropdown_item(inputs, input_id, str(saved[input_id]))
     _set_drivetrain_inputs_visibility(inputs)
     _set_build_chain_inputs_visibility(inputs)
+    # REAL BUG FIXED HERE: sensor{1,2,3}_type is itself a persisted dropdown
+    # (see _PERSISTED_DROPDOWN_FIELD_IDS) and its parent_link/name/update_rate
+    # fields are persisted strings too, so a saved "Camera"/"Lidar"/"IMU"
+    # selection and its values ARE restored above -- but without this call
+    # their inputs stayed hidden (still at the all-slots-"None" visibility
+    # set once at command-creation time, before this restore ran), so a user
+    # reopening "Generate ROS 2 Package" (or restarting Fusion) saw a sensor
+    # slot silently reset back to "None" in the dropdown... no, worse: the
+    # dropdown itself correctly showed "Camera" again, but its parent
+    # link/name/rate fields stayed invisible, hiding data that was in fact
+    # restored and would still be used on Generate. Same
+    # show/hide-after-restore pattern as the two calls just above.
+    _set_sensor_inputs_visibility(inputs)
 
 
 def _apply_drivetrain_smart_default_checkboxes(inputs: "adsk.core.CommandInputs") -> None:

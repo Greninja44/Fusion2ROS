@@ -554,6 +554,64 @@ def test_params_yaml_is_parseable_and_structured_correctly():
     assert doc["bt_navigator"]["ros__parameters"]["robot_base_frame"] == "base_link"
 
 
+@requires_yaml
+def test_scan_topic_matches_sensors_py_bridged_topic_for_lidar_sensor():
+    """A declared lidar Sensor's scan topic must match the real ROS topic
+    fusion_addin/generators/sensors.py's generate_ros_gz_bridge_yaml bridges
+    it under ("/{sensor.name}", NOT the bare sensor name) -- otherwise amcl/
+    the costmaps subscribe to a topic nothing ever publishes. Regression
+    test for a real bug: _find_scan_topic used to return the bare
+    `sensor.name` (no leading slash)."""
+    from robot_model import Sensor
+
+    robot = build_sample_rover()
+    robot.sensors.append(Sensor(name="main_lidar", type="lidar", parent_link="base_link"))
+    text = generate_nav2_params_yaml(robot)
+    doc = yaml.safe_load(text)
+
+    assert doc["amcl"]["ros__parameters"]["scan_topic"] == "/main_lidar"
+    local_scan = doc["local_costmap"]["local_costmap"]["ros__parameters"]["obstacle_layer"]["scan"]["topic"]
+    global_scan = doc["global_costmap"]["global_costmap"]["ros__parameters"]["obstacle_layer"]["scan"]["topic"]
+    assert local_scan == "/main_lidar"
+    assert global_scan == "/main_lidar"
+
+
+@requires_yaml
+def test_scan_topic_recognizes_gpu_lidar_sensor_type_too():
+    """fusion_addin/generators/sensors.py treats "lidar" and "gpu_lidar" as
+    synonyms for the same real gz-sim sensor tag (see that module's
+    docstring) -- this generator's scan-topic detection must recognize both
+    spellings the same way, not silently fall back to the "scan" default for
+    a "gpu_lidar"-typed sensor. Regression test for a real bug:
+    _find_scan_topic / detect's has_lidar_sensor check only matched
+    "lidar", not "gpu_lidar"."""
+    from robot_model import Sensor
+
+    robot = build_sample_rover()
+    robot.sensors.append(Sensor(name="main_lidar", type="gpu_lidar", parent_link="base_link"))
+    text = generate_nav2_params_yaml(robot)
+    doc = yaml.safe_load(text)
+
+    assert doc["amcl"]["ros__parameters"]["scan_topic"] == "/main_lidar"
+
+
+def test_scan_topic_parameters_override_is_honored():
+    from robot_model import Sensor
+
+    robot = build_sample_rover()
+    robot.sensors.append(
+        Sensor(name="main_lidar", type="lidar", parent_link="base_link", parameters={"topic": "custom_scan"})
+    )
+    text = generate_nav2_params_yaml(robot)
+    assert "scan_topic: custom_scan" in text
+
+
+def test_scan_topic_defaults_to_scan_when_no_lidar_sensor():
+    robot = build_sample_rover()
+    text = generate_nav2_params_yaml(robot)
+    assert "scan_topic: scan" in text
+
+
 # --- generate_nav2_bringup_launch -------------------------------------------
 
 

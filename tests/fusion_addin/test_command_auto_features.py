@@ -453,6 +453,33 @@ def test_apply_persisted_dialog_state_ignores_unknown_dropdown_label():
     assert inputs.itemById("drivetrain_type").selectedItem.name == cmd._DRIVETRAIN_NONE
 
 
+def test_apply_persisted_dialog_state_restores_sensor_slot_visibility():
+    # Real bug: a saved sensor slot (type + its parent_link/name/update_rate
+    # strings, all persisted fields -- see _PERSISTED_DROPDOWN_FIELD_IDS /
+    # _PERSISTED_STRING_FIELD_IDS) was restored data-wise but its inputs
+    # stayed hidden, because _apply_persisted_dialog_state refreshed
+    # drivetrain/build-chain visibility but never sensor visibility.
+    ids = cmd._sensor_slot_input_ids(2)
+    saved = {
+        ids["type"]: cmd._SENSOR_TYPE_LIDAR,
+        ids["parent_link"]: "base_link",
+        ids["name"]: "front_lidar",
+        ids["update_rate"]: "10",
+    }
+
+    fresh_inputs = _FakeInputs()
+    cmd._apply_persisted_dialog_state(fresh_inputs, saved)
+
+    assert fresh_inputs.itemById(ids["type"]).selectedItem.name == cmd._SENSOR_TYPE_LIDAR
+    assert fresh_inputs.itemById(ids["parent_link"]).value == "base_link"
+    assert fresh_inputs.itemById(ids["parent_link"]).isVisible is True
+    assert fresh_inputs.itemById(ids["name"]).isVisible is True
+    assert fresh_inputs.itemById(ids["update_rate"]).isVisible is True
+    # Untouched slots stay hidden.
+    other_ids = cmd._sensor_slot_input_ids(1)
+    assert fresh_inputs.itemById(other_ids["parent_link"]).isVisible is False
+
+
 # ---------------------------------------------------------------------------
 # _validate_generated_package
 # ---------------------------------------------------------------------------

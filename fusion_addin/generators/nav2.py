@@ -388,15 +388,29 @@ def compute_footprint_radius(robot: Robot) -> Tuple[float, List[str]]:
     return max_radius, sorted(skipped_mesh_links)
 
 
+_LIDAR_SENSOR_TYPES = ("lidar", "gpu_lidar")
+
+
 def _find_scan_topic(robot: Robot) -> str:
-    """Best-effort scan topic name: use a declared lidar sensor's name (or
-    its `parameters['topic']` override) if one exists on the robot, else fall
-    back to Nav2's conventional default topic name "scan". Never invents a
-    topic name beyond what the robot or Nav2 convention already supplies."""
+    """Best-effort scan topic name: use a declared lidar sensor's `topic`
+    override (`sensor.parameters['topic']`, an escape hatch for e.g. a real
+    hardware driver publishing under a custom name) if set, else the actual
+    topic `fusion_addin/generators/sensors.py` publishes that sensor's
+    LaserScan on -- `"/{sensor.name}"` (that module's `_default_topic`,
+    also what `generate_ros_gz_bridge_yaml` bridges into ROS under). Falls
+    back to Nav2's conventional default topic name "scan" only if the robot
+    has no lidar sensor at all. Never invents a topic name beyond what the
+    robot or Nav2 convention already supplies.
+
+    Matches BOTH "lidar" and "gpu_lidar" sensor types -- sensors.py treats
+    them as synonyms for the same real gz-sim `gpu_lidar` sensor tag (see
+    that module's docstring), so a robot using either spelling must resolve
+    to the same scan topic here.
+    """
     for sensor in robot.sensors:
-        if sensor.type.lower() == "lidar":
+        if sensor.type.lower() in _LIDAR_SENSOR_TYPES:
             topic = sensor.parameters.get("topic") if sensor.parameters else None
-            return str(topic) if topic else sensor.name
+            return str(topic) if topic else f"/{sensor.name}"
     return "scan"
 
 
@@ -457,7 +471,7 @@ def generate_nav2_params_yaml(robot: Robot) -> str:
             + "\n"
         )
 
-    has_lidar_sensor = any(s.type.lower() == "lidar" for s in robot.sensors)
+    has_lidar_sensor = any(s.type.lower() in _LIDAR_SENSOR_TYPES for s in robot.sensors)
     if has_lidar_sensor:
         scan_topic_note = "from a declared lidar Sensor on this robot"
     else:
