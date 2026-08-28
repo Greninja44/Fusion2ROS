@@ -6,6 +6,7 @@ throwaway workspace and is skipped automatically when colcon or the ROS 2
 "lyrical" setup script aren't available.
 """
 
+import ast
 import shutil
 import subprocess
 import sys
@@ -263,6 +264,70 @@ def test_extra_files_rejects_unsupported_type(tmp_path):
     with pytest.raises(TypeError):
         generate_package(
             robot, TRIVIAL_URDF_XACRO, {}, tmp_path, extra_files={"config/bad.yaml": 12345}
+        )
+
+
+# --- metadata/name edge cases -------------------------------------------
+
+
+def test_package_xml_escapes_special_characters_in_metadata(tmp_path):
+    # Real bug: package.xml's fields were built with raw f-string
+    # interpolation of free-form metadata text (a Fusion project
+    # description, a maintainer's name, ...). A description like
+    # "Arm & Gripper <v2>" or a maintainer name containing a `"` produced
+    # package.xml that isn't well-formed XML at all.
+    robot = make_demo_robot()
+    robot.metadata = {
+        "description": "Arm & Gripper <v2>",
+        "maintainer_name": 'O\'Brien "Bob"',
+        "maintainer_email": "a@b.com",
+        "license": "BSD & MIT",
+    }
+    pkg_dir = generate_package(robot, TRIVIAL_URDF_XACRO, {}, tmp_path)
+
+    package_xml_path = pkg_dir / "package.xml"
+    tree = ET.parse(package_xml_path)  # raises if not well-formed
+    root = tree.getroot()
+    assert root.findtext("description") == "Arm & Gripper <v2>"
+    assert root.findtext("maintainer") == 'O\'Brien "Bob"'
+    assert root.find("maintainer").get("email") == "a@b.com"
+    assert root.findtext("license") == "BSD & MIT"
+
+
+def test_launch_file_is_valid_python_when_robot_name_contains_quotes(tmp_path):
+    # Real bug: PACKAGE_NAME/URDF_XACRO_FILE/RVIZ_CONFIG_FILE were built by
+    # wrapping robot.name in literal double quotes via an f-string, so a
+    # robot named e.g. 'weird"name' produced a display.launch.py that failed
+    # to even parse (unterminated string literal).
+    robot = make_demo_robot(name='weird"name')
+    pkg_dir = generate_package(robot, TRIVIAL_URDF_XACRO, {}, tmp_path)
+
+    launch_text = (pkg_dir / "launch" / "display.launch.py").read_text()
+    ast.parse(launch_text)  # raises SyntaxError if malformed
+    assert 'weird"name' in launch_text
+
+
+def test_generate_package_rejects_robot_name_that_escapes_output_dir(tmp_path):
+    # Real bug: pathlib's `/` silently discards the left side when the right
+    # side is absolute, and a ".." component walks back out of output_dir --
+    # either way, output_dir / robot.name could resolve outside output_dir,
+    # and generate_package unconditionally shutil.rmtree's whatever's there.
+    robot = make_demo_robot(name="../escaped_pkg")
+    with pytest.raises(ValueError, match="Robot.name"):
+        generate_package(robot, TRIVIAL_URDF_XACRO, {}, tmp_path)
+
+
+def test_generate_package_rejects_mesh_files_key_that_escapes_meshes_dir(tmp_path):
+    robot = make_demo_robot()
+    with pytest.raises(ValueError, match="mesh_files"):
+        generate_package(robot, TRIVIAL_URDF_XACRO, {"../escaped.stl": FAKE_MESH_BYTES}, tmp_path)
+
+
+def test_generate_package_rejects_extra_files_key_that_escapes_pkg_dir(tmp_path):
+    robot = make_demo_robot()
+    with pytest.raises(ValueError, match="extra_files"):
+        generate_package(
+            robot, TRIVIAL_URDF_XACRO, {}, tmp_path, extra_files={"../escaped.yaml": "data: 1\n"}
         )
 
 
