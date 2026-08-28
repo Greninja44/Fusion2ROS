@@ -167,10 +167,21 @@ _SENSOR_TYPE_NONE = "None"
 _SENSOR_TYPE_CAMERA = "Camera"
 _SENSOR_TYPE_LIDAR = "Lidar"
 _SENSOR_TYPE_IMU = "IMU"
+_SENSOR_TYPE_DEPTH_CAMERA = "Depth Camera"
+_SENSOR_TYPE_GPS = "GPS / NavSat"
+# "force_torque" is deliberately NOT offered here: gz-sim's force_torque
+# sensor is joint-mounted (see generators/sensors.py's
+# _gazebo_reference_for_sensor docstring) and needs a
+# parameters["joint"] override this fixed type+parent_link+name+update_rate
+# slot shape has no field for -- a user who wants one can still hand-edit
+# the generated URDF/robot script, same as any sensor needing a pose offset
+# already can (see _build_sensors' docstring).
 _SENSOR_TYPE_LABEL_TO_MODEL_TYPE = {
     _SENSOR_TYPE_CAMERA: "camera",
     _SENSOR_TYPE_LIDAR: "lidar",
     _SENSOR_TYPE_IMU: "imu",
+    _SENSOR_TYPE_DEPTH_CAMERA: "depth_camera",
+    _SENSOR_TYPE_GPS: "gps",
 }
 _SENSOR_SLOT_COUNT = 3
 _SENSOR_SLOT_IDS = tuple(range(1, _SENSOR_SLOT_COUNT + 1))
@@ -792,6 +803,8 @@ class GenerateCommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 sensor_dropdown.listItems.add(_SENSOR_TYPE_CAMERA, False)
                 sensor_dropdown.listItems.add(_SENSOR_TYPE_LIDAR, False)
                 sensor_dropdown.listItems.add(_SENSOR_TYPE_IMU, False)
+                sensor_dropdown.listItems.add(_SENSOR_TYPE_DEPTH_CAMERA, False)
+                sensor_dropdown.listItems.add(_SENSOR_TYPE_GPS, False)
                 inputs.addStringValueInput(
                     ids["parent_link"], f"  Sensor {slot} parent link name", ""
                 )

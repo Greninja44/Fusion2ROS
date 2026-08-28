@@ -387,6 +387,25 @@ def test_world_sdf_has_sensor_system_plugins():
     assert plugins["gz-sim-imu-system"].attrib["name"] == "gz::sim::systems::Imu"
 
 
+def test_world_sdf_has_navsat_and_forcetorque_system_plugins():
+    """Regression: fusion_addin/generators/sensors.py's "gps"/"navsat" and
+    "force_torque" sensor types need their own dedicated gz-sim world system
+    plugins to publish at all (same "camera/lidar work, but this type
+    doesn't advertise its topic without an extra plugin" pattern already
+    confirmed for imu -- see test_world_sdf_has_sensor_system_plugins).
+    Plugin filenames/names confirmed against this machine's installed
+    .../gz-sim/worlds/spherical_coordinates.sdf (navsat) and
+    .../gz-sim/worlds/sensors.sdf (force_torque), and against a real
+    headless `gz sim -s -r` run with a spawned robot carrying both sensor
+    types (see sensors.py's/gazebo.py's docstrings)."""
+    world = ET.fromstring(generate_world_sdf()).find("world")
+    plugins = {p.attrib["filename"]: p for p in world.findall("plugin")}
+    assert "gz-sim-navsat-system" in plugins
+    assert plugins["gz-sim-navsat-system"].attrib["name"] == "gz::sim::systems::NavSat"
+    assert "gz-sim-forcetorque-system" in plugins
+    assert plugins["gz-sim-forcetorque-system"].attrib["name"] == "gz::sim::systems::ForceTorque"
+
+
 # --- generate_spawn_launch -----------------------------------------------
 
 
