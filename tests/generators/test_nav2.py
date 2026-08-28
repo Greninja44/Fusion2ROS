@@ -6,7 +6,9 @@ generated text parses as real YAML; the generator module itself never
 imports it (see fusion_addin/generators/nav2.py's module docstring).
 """
 
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -745,15 +747,65 @@ def _wait_for_node(node_name: str, timeout: float = 25.0) -> bool:
     return False
 
 
-def _terminate(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
+def _launch_ros2_node(cmd: list) -> tuple:
+    """Popen wrapper for `ros2 run ...` that also captures the process's own
+    process-group id right away, while the process is guaranteed alive.
+
+    `ros2 run <pkg> <exe>` forks the real node as a genuine child process on
+    this system rather than exec-replacing itself, so killing only the
+    tracked wrapper PID leaves the actual node process orphaned and still
+    holding the stdout pipe's write end open -- confirmed directly by a
+    GitHub Actions "Terminate orphan process: ... (planner_server)" cleanup
+    line on a real CI run. `start_new_session=True` makes the wrapper (and
+    anything it forks, which inherits the same process group) killable as
+    one unit via `os.killpg`. The pgid is captured here, immediately after
+    spawn, rather than looked up lazily in `_terminate`: if the wrapper has
+    already exited by the time cleanup runs, `os.getpgid(proc.pid)` on the
+    now-dead PID raises `ProcessLookupError` and the still-live orphaned
+    child could never be reached.
+    """
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True
+    )
+    return proc, os.getpgid(proc.pid)
+
+
+def _terminate(proc: subprocess.Popen, pgid: int) -> None:
+    """Kill the process group `pgid` (see _launch_ros2_node), not just proc's
+    own PID -- see _launch_ros2_node's docstring for why that matters."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
         return
-    proc.terminate()
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:  # pragma: no cover - environment dependent
-        proc.kill()
-        proc.wait(timeout=5)
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:  # pragma: no cover - process died concurrently
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover - environment dependent
+            pass
+
+
+def _drain_output(proc: subprocess.Popen) -> str:
+    """Best-effort capture of proc's remaining stdout, bounded by a timeout.
+
+    A raw proc.stdout.read() can hang forever if a descendant process
+    launched by `ros2 run` is still alive and holding the pipe's write end
+    open (see _launch_ros2_node's docstring). communicate(timeout=...) is
+    the safe alternative: it still reads whatever is buffered, but never
+    blocks past the timeout.
+    """
+    if proc.stdout is None:
+        return "<no output captured>"
+    try:
+        output, _ = proc.communicate(timeout=5)
+        return output or "<no output captured>"
+    except subprocess.TimeoutExpired:
+        return "<output capture timed out -- a descendant process may still hold the pipe open>"
 
 
 @requires_real_nav2_servers
@@ -807,20 +859,19 @@ def test_real_nav2_servers_configure_cleanly_against_generated_params(tmp_path):
             ]
             for override in overrides:
                 cmd += ["-p", override]
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-            )
-            procs.append((node_name, proc))
+            proc, pgid = _launch_ros2_node(cmd)
+            procs.append((node_name, proc, pgid))
 
-        for node_name, proc in procs:
+        for node_name, proc, pgid in procs:
             assert _wait_for_node(f"/{node_name}", timeout=25.0), (
                 f"{node_name} never appeared on the ROS graph (process exited early?)"
             )
-            assert proc.poll() is None, (
-                f"{node_name} exited before it could be configured, output:\n{proc.stdout.read()}"
-            )
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"{node_name} exited before it could be configured, output:\n{_drain_output(proc)}"
+                )
 
-        for node_name, proc in procs:
+        for node_name, proc, pgid in procs:
             result = subprocess.run(
                 ["ros2", "lifecycle", "set", f"/{node_name}", "configure"],
                 capture_output=True,
@@ -828,8 +879,8 @@ def test_real_nav2_servers_configure_cleanly_against_generated_params(tmp_path):
                 timeout=20,
             )
             if "Transitioning successful" not in result.stdout:
-                _terminate(proc)
-                node_output = proc.stdout.read() if proc.stdout else "<no output captured>"
+                _terminate(proc, pgid)
+                node_output = _drain_output(proc)
                 raise AssertionError(
                     f"{node_name} failed to configure against the generated nav2_params.yaml.\n"
                     f"lifecycle set stdout: {result.stdout}\nstderr: {result.stderr}\n"
@@ -837,8 +888,8 @@ def test_real_nav2_servers_configure_cleanly_against_generated_params(tmp_path):
                 )
             assert proc.poll() is None, f"{node_name} crashed during configure"
     finally:
-        for _, proc in procs:
-            _terminate(proc)
+        for _, proc, pgid in procs:
+            _terminate(proc, pgid)
 
 
 @requires_real_nav2_servers
@@ -858,7 +909,7 @@ def test_map_yaml_stub_configure_fails_against_real_map_server(tmp_path):
     # generate_map_yaml_stub's "image: map.pgm" is deliberately never created.
 
     # map_server takes yaml_filename as a *parameter*, not a params file.
-    proc = subprocess.Popen(
+    proc, pgid = _launch_ros2_node(
         [
             "ros2",
             "run",
@@ -869,10 +920,7 @@ def test_map_yaml_stub_configure_fails_against_real_map_server(tmp_path):
             f"yaml_filename:={map_yaml_path}",
             "-p",
             "use_sim_time:=false",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+        ]
     )
     try:
         assert _wait_for_node("/map_server", timeout=25.0), "map_server never appeared on the ROS graph"
@@ -883,8 +931,8 @@ def test_map_yaml_stub_configure_fails_against_real_map_server(tmp_path):
             timeout=20,
         )
         if "Transitioning failed" not in result.stdout + result.stderr:
-            _terminate(proc)
-            node_output = proc.stdout.read() if proc.stdout else "<no output captured>"
+            _terminate(proc, pgid)
+            node_output = _drain_output(proc)
             raise AssertionError(
                 "expected map_server's configure transition to FAIL against the "
                 f"placeholder stub (image file does not exist).\n"
@@ -892,4 +940,4 @@ def test_map_yaml_stub_configure_fails_against_real_map_server(tmp_path):
                 f"map_server's own console output:\n{node_output}"
             )
     finally:
-        _terminate(proc)
+        _terminate(proc, pgid)
