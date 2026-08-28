@@ -45,7 +45,10 @@ jobs:
             ros-jazzy-nav2-amcl \
             ros-jazzy-nav2-bt-navigator \
             ros-jazzy-nav2-controller \
+            ros-jazzy-nav2-regulated-pure-pursuit-controller \
+            ros-jazzy-nav2-mppi-controller \
             ros-jazzy-nav2-planner \
+            ros-jazzy-nav2-navfn-planner \
             ros-jazzy-nav2-map-server \
             ros-jazzy-nav2-lifecycle-manager \
             ros-jazzy-nav2-behaviors \
