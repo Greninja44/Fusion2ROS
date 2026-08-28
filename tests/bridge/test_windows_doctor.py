@@ -123,3 +123,50 @@ def test_check_gazebo_false_by_default_omits_the_gazebo_check(tmp_path):
         distro=DEFAULT_DISTRO, ros_setup=DEFAULT_ROS_SETUP, wsl_ros_ws_src=str(tmp_path / "src")
     )
     assert not any("Gazebo" in c.name for c in checks)
+
+
+@requires_wsl_and_ros
+def test_include_build_probe_false_skips_the_slow_colcon_build_check(tmp_path):
+    """sync_addin.py's automatic post-install check uses this to get a fast
+    subset report -- the expensive real `colcon build` probe must be the
+    only thing omitted, everything else should still run normally."""
+    ws_src = str(tmp_path / "ros2_ws" / "src")
+    checks = run_environment_checks(
+        distro=DEFAULT_DISTRO,
+        ros_setup=DEFAULT_ROS_SETUP,
+        wsl_ros_ws_src=ws_src,
+        include_build_probe=False,
+    )
+    names = [c.name for c in checks]
+
+    assert "colcon can actually build a package" not in names
+    assert "WSL installed" in names
+    assert f"Distro {DEFAULT_DISTRO!r} reachable" in names
+    assert f"ROS 2 setup script {DEFAULT_ROS_SETUP!r}" in names
+    assert "colcon on PATH" in names
+    assert f"Colcon workspace src/ {ws_src!r}" in names
+    assert Path(ws_src).is_dir()
+
+
+def test_include_build_probe_defaults_to_true(monkeypatch):
+    """Backward compatibility: every existing caller (Fusion's "Check WSL
+    Environment" command, the Generate->Build->Launch gate, and the rest of
+    this test file) relies on the build probe running unless explicitly
+    opted out."""
+    import bridge.windows.doctor as doctor_module
+
+    monkeypatch.setattr(doctor_module, "is_wsl_available", lambda: True)
+    monkeypatch.setattr(doctor_module, "run_in_wsl", lambda *a, **kw: doctor_module.WslResult(True, "", "", 0))
+
+    probe_calls = []
+    real_probe = doctor_module._colcon_build_probe
+
+    def spy_probe(*args, **kwargs):
+        probe_calls.append((args, kwargs))
+        return doctor_module.WslResult(True, "", "", 0)
+
+    monkeypatch.setattr(doctor_module, "_colcon_build_probe", spy_probe)
+
+    checks = doctor_module.run_environment_checks()
+    assert len(probe_calls) == 1
+    assert any(c.name == "colcon can actually build a package" for c in checks)

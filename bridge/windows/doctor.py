@@ -109,12 +109,23 @@ def run_environment_checks(
     ros_setup: str = DEFAULT_ROS_SETUP,
     wsl_ros_ws_src: str = DEFAULT_WSL_ROS_WS_SRC,
     check_gazebo: bool = False,
+    include_build_probe: bool = True,
 ) -> List[DoctorCheck]:
     """Run every check and return the full list (not just failures) --
     callers can render an all-clear summary just as easily as an itemized
     failure list. Never raises: a check that can't even run (e.g. `wsl.exe`
     itself missing) is reported as a normal failed DoctorCheck, same as any
     other, so a caller never needs a separate try/except around this.
+
+    `include_build_probe` (default True): also run `_colcon_build_probe`,
+    a real throwaway `colcon build` -- the check that actually matters (see
+    module docstring) but also the only slow one here (a few seconds up to
+    ~a minute). Pass False for a fast subset (WSL/distro/ROS-setup/
+    colcon-on-PATH/workspace-dir only) when a quick sanity read is enough,
+    e.g. `sync_addin.py` running this automatically right after every
+    install/sync. Fusion's own "Check WSL Environment" command and the
+    one-click Generate->Build->Launch gate still default to True, since
+    those are exactly the moments a real build is about to be attempted.
     """
     checks: List[DoctorCheck] = []
 
@@ -181,22 +192,23 @@ def run_environment_checks(
     # lacking catkin_pkg) for reasons never fully pinned down. A real
     # `colcon build` is the only fully faithful reproduction of what a real
     # build will actually do.
-    build_probe = _colcon_build_probe(distro, ros_setup, timeout=60)
-    checks.append(
-        DoctorCheck(
-            "colcon can actually build a package",
-            build_probe.success,
-            "OK"
-            if build_probe.success
-            else (
-                "A real `colcon build` of a minimal throwaway package failed -- every real "
-                "package will fail to build too. Usually caused by CMake's Python3 interpreter "
-                "resolution picking a different `python3` than the one on PATH (e.g. a "
-                "uv/pyenv-managed interpreter lacking `catkin_pkg`) -- check `which -a "
-                f"python3*` inside the distro. Detail:\n{build_probe.stderr.strip()}"
-            ),
+    if include_build_probe:
+        build_probe = _colcon_build_probe(distro, ros_setup, timeout=60)
+        checks.append(
+            DoctorCheck(
+                "colcon can actually build a package",
+                build_probe.success,
+                "OK"
+                if build_probe.success
+                else (
+                    "A real `colcon build` of a minimal throwaway package failed -- every real "
+                    "package will fail to build too. Usually caused by CMake's Python3 interpreter "
+                    "resolution picking a different `python3` than the one on PATH (e.g. a "
+                    "uv/pyenv-managed interpreter lacking `catkin_pkg`) -- check `which -a "
+                    f"python3*` inside the distro. Detail:\n{build_probe.stderr.strip()}"
+                ),
+            )
         )
-    )
 
     ws_result = run_in_wsl(f"mkdir -p {shlex.quote(wsl_ros_ws_src)}", distro=distro, timeout=15)
     checks.append(
