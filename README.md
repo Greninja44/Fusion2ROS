@@ -136,9 +136,12 @@ a one-shot export:
   the candidates are ambiguous, rather than risk pairing wheels that don't
   belong together.
 - **Sensor UI** — three slots (type + parent link + optional name/update
-  rate) to attach cameras, lidar, or IMUs to links, feeding straight into
-  `generators/sensors.py`'s existing Gazebo XML and `ros_gz_bridge`
-  generation.
+  rate) to attach cameras, depth cameras, lidar, IMUs, or GPS/NavSat units
+  to links, feeding straight into `generators/sensors.py`'s existing Gazebo
+  XML and `ros_gz_bridge` generation. (Force/torque sensors are
+  generator-level only — they're joint-mounted, not link-mounted, so they
+  don't fit this slot shape; attach one by hand-editing the generated
+  `Robot`/URDF, see `generators/sensors.py`.)
 - **Smart checkbox defaults** — picking a drivetrain nudges "Gazebo" and
   "Nav2" on; a suitable single-chain arm nudges "MoveIt 2" on. Always
   one-directional — it never unchecks something you already chose.
