@@ -175,6 +175,60 @@ python3 scripts/generate_from_json.py robot.json --output-dir output/ --ros2-con
 `RobotModel`s used for exactly this — testing and demos with no Fusion
 process involved.
 
+### Previewing a package before generating it (`--dry-run`)
+
+`--dry-run` runs the exact same validation and path-computation as a real
+generation, but writes nothing to disk — instead it prints the list of
+files that *would* be written, each with a short description:
+
+```
+python3 scripts/generate_from_json.py robot.json --dry-run --ros2-control --moveit
+```
+
+```
+Dry run -- would generate ROS 2 package at: output/sample_arm
+  package.xml                    ROS 2 package manifest (name, dependencies, maintainer)
+  urdf/sample_arm.urdf.xacro     Robot description (URDF/Xacro)
+  launch/display.launch.py       RViz display launch file
+  rviz/sample_arm.rviz           RViz configuration
+  config/controllers.yaml        Generated output (text)
+  ...
+No files were written.
+```
+
+Any problem a real run would catch — a missing actuator limit, a robot
+unsuitable for MoveIt/Nav2, an escaping robot name or file path — is still
+caught and reported the same way; only the final disk write is skipped.
+
+### Config file (`.fusion2ros.yaml`)
+
+Repeated flags — which optional outputs to include, the default output
+directory, and default `package.xml` maintainer/license metadata — can be
+set once instead of retyped on every invocation. `generate_from_json.py`
+looks for `./.fusion2ros.yaml`, then `~/.fusion2ros.yaml`, unless `--config
+PATH` names one explicitly or `--no-config` disables config lookup
+entirely:
+
+```yaml
+output_dir: output/
+include:
+  ros2_control: true
+  gazebo: false
+  moveit: true
+  nav2: false
+moveit_group: arm
+maintainer:
+  name: Jane Doe
+  email: jane@example.com
+license: Apache-2.0
+```
+
+**Precedence: an explicit CLI flag always wins over the config file**, e.g.
+`--no-moveit` disables MoveIt even if the config file sets `moveit: true`.
+Maintainer/license values only fill in fields a robot's own JSON doesn't
+already set — see `fusion_addin/config.py`'s module docstring for the full
+format and precedence rule.
+
 ## Running the full demo (generate → colcon build, against a real ROS 2 workspace)
 
 ```
