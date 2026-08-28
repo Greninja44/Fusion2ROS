@@ -152,6 +152,25 @@ def _is_differential_drive(robot: Robot) -> bool:
     return bool(drivetrain) and drivetrain.get("type") == "differential_drive"
 
 
+_DIFF_DRIVE_REQUIRED_KEYS = ("left_wheel_joint", "right_wheel_joint", "wheel_separation", "wheel_radius")
+
+
+def _validate_diff_drive_metadata(drivetrain: Dict[str, object]) -> None:
+    """Raise a clear `ValueError` naming any key missing from a
+    `"differential_drive"` `robot.metadata["drivetrain"]` dict, rather than
+    letting `_build_diff_drive_plugin_element`'s raw `drivetrain[key]`
+    lookups fail with an unhelpful bare `KeyError` -- same "don't invent,
+    fail clearly" principle `fusion_addin/generators/ros2_control.py`'s
+    `_drivetrain_info` already applies to this exact metadata shape."""
+    missing = [key for key in _DIFF_DRIVE_REQUIRED_KEYS if key not in drivetrain]
+    if missing:
+        raise ValueError(
+            f"Robot.metadata['drivetrain'] is missing required key(s) {missing!r}. "
+            "Expected: {'type': 'differential_drive', 'left_wheel_joint': ..., "
+            "'right_wheel_joint': ..., 'wheel_separation': ..., 'wheel_radius': ...}"
+        )
+
+
 def uses_gz_ros2_control_fallback(robot: Robot) -> bool:
     """True when `generate_gazebo_xml(robot)` will emit the `gz_ros2_control`
     plugin rather than gz-sim's native `DiffDrive` -- i.e. every case except
@@ -290,6 +309,7 @@ def _build_diff_drive_plugin_element(drivetrain: Dict[str, object], base_frame: 
     `cmd_vel`/`odom`/`tf` topic names `generate_gazebo_ros_bridge_yaml`
     bridges into ROS -- and `odom_frame_id`/`base_frame_id` conventions
     `nav2.py` already assumes (`odom`, `robot.root_link().name`)."""
+    _validate_diff_drive_metadata(drivetrain)
     elem = ET.Element("gazebo")
     plugin = ET.SubElement(
         elem, "plugin", {"filename": GZ_DIFF_DRIVE_PLUGIN_FILENAME, "name": GZ_DIFF_DRIVE_PLUGIN_NAME}

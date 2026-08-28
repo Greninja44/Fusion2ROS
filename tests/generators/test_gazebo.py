@@ -226,6 +226,21 @@ def test_differential_drive_robot_gets_native_diff_drive_plugin_not_ros2_control
     assert plugin.find("child_frame_id").text == "base_link"
 
 
+def test_differential_drive_missing_metadata_key_raises_clear_value_error():
+    # Real bug: generate_gazebo_xml used to let _build_diff_drive_plugin_element's
+    # raw drivetrain["wheel_separation"]/["wheel_radius"] lookups fail with a
+    # bare, unhelpful KeyError for an incomplete "differential_drive" metadata
+    # dict, instead of the clear, key-naming ValueError
+    # fusion_addin/generators/ros2_control.py's _drivetrain_info already
+    # raises for this exact metadata shape.
+    robot = make_diff_drive_rover()
+    del robot.metadata["drivetrain"]["wheel_separation"]
+    del robot.metadata["drivetrain"]["wheel_radius"]
+
+    with pytest.raises(ValueError, match=r"wheel_separation.*wheel_radius|drivetrain.*missing"):
+        generate_gazebo_xml(robot)
+
+
 def test_gazebo_ros_bridge_yaml_for_differential_drive_has_cmd_vel_odom_tf_and_joint_states():
     robot = make_diff_drive_rover()
     text = generate_gazebo_ros_bridge_yaml(robot)
