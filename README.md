@@ -66,25 +66,43 @@ there:
   on your machine:** make `FusionAddins/Fusion2ROS` a directory symlink into
   this repo's `fusion_addin/` folder over the WSL UNC path — edits made in
   WSL are then visible to Fusion instantly, no separate sync step.
-- **Fallback (always works):** `python3 -m bridge.windows.sync_addin`
-  (add `--watch` to keep mirroring on every save) copies `fusion_addin/`,
-  plus the three repo-root packages it imports by absolute name
-  (`robot_model/`, `bridge/windows/`, `ros2_tools/validate/`), into
-  `FusionAddins/Fusion2ROS`. Re-run it after every edit unless you use
-  `--watch`.
+- **Fallback (always works), and now a single command:**
+  `python3 -m bridge.windows.sync_addin`. It copies `fusion_addin/`, plus
+  the three repo-root packages it imports by absolute name (`robot_model/`,
+  `bridge/windows/`, `ros2_tools/validate/`), into `FusionAddins/Fusion2ROS`
+  — validating up front that the destination is writable and the source has
+  the add-in's `Fusion2ROS.py` entry point, so a doomed sync fails fast with
+  one actionable message instead of a raw traceback — and then, right after
+  a successful copy, automatically runs a fast subset of the same
+  environment checks described below (WSL/distro reachable, ROS setup
+  script present, `colcon` on `PATH`, workspace dir writable) and folds the
+  result into its own exit code (`0` only if the copy *and* that check both
+  succeeded). Pass `--full-env-check` to also include the slower real
+  `colcon build` probe in that same run, `--skip-env-check` to skip the
+  check entirely (e.g. for a fast inner loop), or `--watch` to keep
+  mirroring on every save (only the first sync in `--watch` mode runs the
+  environment check; re-run without `--watch` to check again later).
 
-Then in Fusion: **Tools → Add-Ins → Scripts and Add-Ins → Add-Ins tab →
-Fusion2ROS → Run**. Five new commands appear on the Solid tab's Create
-panel: **Generate ROS 2 Package**, **Validate ROS 2 Package**,
-**Build in WSL**, **Launch RViz**, **Check WSL Environment**.
+That command's own output ends by pointing at the one remaining step that
+genuinely can't be scripted from this side: in Fusion, **Tools → Add-Ins →
+Scripts and Add-Ins → Add-Ins tab → Fusion2ROS → Run**. Five new commands
+then appear on the Solid tab's Create panel: **Generate ROS 2 Package**,
+**Validate ROS 2 Package**, **Build in WSL**, **Launch RViz**,
+**Check WSL Environment**.
 
-### 2. Run the environment check
+### 2. Re-check the environment anytime
 
-Before generating anything, run **Check WSL Environment** — it verifies WSL
-and your distro are reachable, your ROS setup script exists, `colcon` is on
-`PATH`, and (the check that actually matters) `colcon` can build a real
-throwaway package end to end, not just that `catkin_pkg` imports. One clear
-pass/fail report up front beats a build failing halfway through later.
+`sync_addin`'s automatic check above already covers this at install time,
+so there's nothing extra to run before your first **Generate ROS 2
+Package**. To re-verify later — after a WSL/ROS update, on a new machine,
+or just to double check — either re-run `python3 -m bridge.windows.sync_addin`
+(or with `--full-env-check` for the complete check, including a real
+throwaway `colcon build`), or, from inside Fusion, run **Check WSL
+Environment** directly: it verifies WSL and your distro are reachable, your
+ROS setup script exists, `colcon` is on `PATH`, and (the check that
+actually matters) `colcon` can build a real throwaway package end to end,
+not just that `catkin_pkg` imports. One clear pass/fail report up front
+beats a build failing halfway through later.
 
 ### 3. Generate a package
 
