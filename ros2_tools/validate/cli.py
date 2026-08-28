@@ -37,14 +37,36 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     path: Path = args.path
 
-    if not path.exists():
+    # validate_package_structure/validate_urdf_file are both documented to
+    # never raise for a bad/invalid *target* (a missing package.xml, a
+    # malformed URDF, ...) -- those come back as `problems` entries, printed
+    # below like any other finding. What they don't guard against is the
+    # filesystem itself misbehaving on the initial exists()/is_dir() probe
+    # (e.g. a dangling symlink, a permissions error, a path on an unmounted
+    # network share) -- an OSError there is still an expected, actionable
+    # "can't get at that path" problem, not a bug in this tool, so it gets
+    # the same one-line stderr message as the plain "does not exist" case
+    # rather than a raw traceback. Anything else escaping from here (a
+    # genuine bug in the validators) is deliberately left to propagate with
+    # its real traceback rather than being swallowed.
+    try:
+        exists = path.exists()
+    except OSError as exc:
+        print(f"error: could not access path '{path}': {exc}", file=sys.stderr)
+        return 1
+
+    if not exists:
         print(f"error: path does not exist: '{path}'", file=sys.stderr)
         return 1
 
-    if path.is_dir():
-        problems = validate_package_structure(path)
-    else:
-        problems = validate_urdf_file(path)
+    try:
+        if path.is_dir():
+            problems = validate_package_structure(path)
+        else:
+            problems = validate_urdf_file(path)
+    except OSError as exc:
+        print(f"error: could not read path '{path}': {exc}", file=sys.stderr)
+        return 1
 
     for problem in problems:
         print(problem)
